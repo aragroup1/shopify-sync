@@ -61,10 +61,8 @@ async function getShopifyProducts() {
 // Generate SEO-friendly description
 function generateSEODescription(product) {
   const title = product.title;
-  const price = product.price;
   const originalDescription = product.description || '';
   
-  // Extract key features and benefits
   const features = [];
   if (title.toLowerCase().includes('halloween')) features.push('perfect for Halloween celebrations');
   if (title.toLowerCase().includes('kids') || title.toLowerCase().includes('children')) features.push('designed for children');
@@ -73,7 +71,6 @@ function generateSEODescription(product) {
   if (title.toLowerCase().includes('decoration')) features.push('enhances any space');
   if (title.toLowerCase().includes('toy')) features.push('safe and durable construction');
   
-  // Create SEO-optimized description
   let seoDescription = `${title} - Premium quality ${title.toLowerCase()} available at LandOfEssentials. `;
   
   if (originalDescription && originalDescription.length > 20) {
@@ -84,10 +81,9 @@ function generateSEODescription(product) {
     seoDescription += `This product is ${features.join(', ')}. `;
   }
   
-  seoDescription += `Order now for fast delivery. Price: £${price}. `;
+  seoDescription += `Order now for fast delivery. `;
   seoDescription += `Shop with confidence at LandOfEssentials - your trusted online retailer for quality products.`;
   
-  // Add relevant keywords based on product type
   const keywords = [];
   if (title.toLowerCase().includes('halloween')) keywords.push('halloween costumes', 'party supplies', 'trick or treat');
   if (title.toLowerCase().includes('game')) keywords.push('family games', 'entertainment', 'fun activities');
@@ -266,11 +262,9 @@ async function handleDiscontinuedProducts() {
     addLog('Checking for discontinued products...', 'info');
     const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]);
     
-    // Get current Apify product handles
     const processedApifyProducts = processApifyProducts(apifyData);
     const currentApifyHandles = new Set(processedApifyProducts.map(p => p.handle));
     
-    // Find Shopify products with Supplier:Apify tag that are no longer in Apify data
     const discontinuedProducts = shopifyData.filter(shopifyProduct => 
       shopifyProduct.tags && 
       shopifyProduct.tags.includes('Supplier:Apify') && 
@@ -284,7 +278,6 @@ async function handleDiscontinuedProducts() {
         if (product.variants && product.variants[0]) {
           const currentInventory = product.variants[0].inventory_quantity || 0;
           
-          // Only update if inventory is not already 0
           if (currentInventory > 0) {
             await shopifyClient.post('/inventory_levels/set.json', {
               location_id: config.shopify.locationId,
@@ -294,12 +287,10 @@ async function handleDiscontinuedProducts() {
             
             addLog(`Discontinued: ${product.title} (${currentInventory} → 0)`, 'success');
             discontinued++;
-          } else {
-            addLog(`Already discontinued: ${product.title} (inventory already 0)`, 'info');
           }
         }
         
-        await new Promise(resolve => setTimeout(resolve, 500)); // Rate limiting
+        await new Promise(resolve => setTimeout(resolve, 500));
       } catch (error) {
         errors++;
         addLog(`Failed to discontinue ${product.title}: ${error.message}`, 'error');
@@ -315,6 +306,13 @@ async function handleDiscontinuedProducts() {
     return { discontinued, errors: errors + 1, total: 0 };
   }
 }
+
+async function updateInventory() {
+  if (systemPaused) {
+    addLog('Inventory update skipped - system is paused', 'warning');
+    return { updated: 0, errors: 0, total: 0 };
+  }
+
   let updated = 0, errors = 0;
   try {
     addLog('Fetching data for inventory updates...', 'info');
@@ -348,7 +346,7 @@ async function handleDiscontinuedProducts() {
         });
         addLog(`Updated: ${update.title} (${update.currentInventory} → ${update.newInventory})`, 'success');
         updated++;
-        await new Promise(resolve => setTimeout(resolve, 500)); // Half second between inventory updates
+        await new Promise(resolve => setTimeout(resolve, 500));
       } catch (error) {
         errors++;
         addLog(`Failed to update ${update.title}: ${error.message}`, 'error');
