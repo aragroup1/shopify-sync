@@ -1,4 +1,3 @@
-
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -58,6 +57,49 @@ async function getShopifyProducts() {
   return response.data.products.filter(p => p.tags && p.tags.includes('Supplier:Apify'));
 }
 
+// Generate SEO-friendly description
+function generateSEODescription(product) {
+  const title = product.title;
+  const price = product.price;
+  const originalDescription = product.description || '';
+  
+  // Extract key features and benefits
+  const features = [];
+  if (title.toLowerCase().includes('halloween')) features.push('perfect for Halloween celebrations');
+  if (title.toLowerCase().includes('kids') || title.toLowerCase().includes('children')) features.push('designed for children');
+  if (title.toLowerCase().includes('game') || title.toLowerCase().includes('puzzle')) features.push('entertaining and educational');
+  if (title.toLowerCase().includes('mask')) features.push('comfortable and easy to wear');
+  if (title.toLowerCase().includes('decoration')) features.push('enhances any space');
+  if (title.toLowerCase().includes('toy')) features.push('safe and durable construction');
+  
+  // Create SEO-optimized description
+  let seoDescription = `${title} - Premium quality ${title.toLowerCase()} available at LandOfEssentials. `;
+  
+  if (originalDescription && originalDescription.length > 20) {
+    seoDescription += `${originalDescription.substring(0, 150)}... `;
+  }
+  
+  if (features.length > 0) {
+    seoDescription += `This product is ${features.join(', ')}. `;
+  }
+  
+  seoDescription += `Order now for fast delivery. Price: £${price}. `;
+  seoDescription += `Shop with confidence at LandOfEssentials - your trusted online retailer for quality products.`;
+  
+  // Add relevant keywords based on product type
+  const keywords = [];
+  if (title.toLowerCase().includes('halloween')) keywords.push('halloween costumes', 'party supplies', 'trick or treat');
+  if (title.toLowerCase().includes('game')) keywords.push('family games', 'entertainment', 'fun activities');
+  if (title.toLowerCase().includes('decoration')) keywords.push('home decor', 'decorative items', 'interior design');
+  if (title.toLowerCase().includes('toy')) keywords.push('children toys', 'educational toys', 'safe toys');
+  
+  if (keywords.length > 0) {
+    seoDescription += ` Perfect for: ${keywords.join(', ')}.`;
+  }
+  
+  return seoDescription;
+}
+
 function processApifyProducts(apifyData) {
   return apifyData.map((item, index) => {
     let handle = '';
@@ -109,12 +151,17 @@ function processApifyProducts(apifyData) {
       inventory = item.variants[0].price.stockStatus === 'IN_STOCK' ? 10 : 0;
     }
 
-    return {
+    const productData = {
       handle, title: cleanTitle,
       description: item.description || `${cleanTitle}\n\nHigh-quality product from LandOfEssentials.`,
       sku: item.sku || '', originalPrice: price.toFixed(2), price: finalPrice.toFixed(2),
       compareAtPrice: (finalPrice * 1.2).toFixed(2), inventory, images, vendor: 'LandOfEssentials'
     };
+
+    // Generate SEO-friendly description
+    productData.seoDescription = generateSEODescription(productData);
+
+    return productData;
   }).filter(Boolean);
 }
 
@@ -129,45 +176,70 @@ async function createNewProducts() {
 
     addLog(`Found ${newProducts.length} new products to create`, 'info');
 
-    for (const product of newProducts) {
-      try {
-        const shopifyProduct = {
-          title: product.title,
-          body_html: product.description.replace(/\n/g, '<br>'),
-          handle: product.handle, vendor: product.vendor, product_type: 'General',
-          tags: `Supplier:Apify,Cost:${product.originalPrice},SKU:${product.sku},Auto-Sync`,
-          variants: [{
-            price: product.price, compare_at_price: product.compareAtPrice,
-            sku: product.sku, inventory_management: 'shopify', inventory_policy: 'deny'
-          }]
-        };
+    // Process products in smaller batches with longer delays
+    const batchSize = 5; // Only 5 products at a time
+    for (let i = 0; i < newProducts.length; i += batchSize) {
+      const batch = newProducts.slice(i, i + batchSize);
+      
+      for (const product of batch) {
+        try {
+          const shopifyProduct = {
+            title: product.title,
+            body_html: product.seoDescription.replace(/\n/g, '<br>'),
+            handle: product.handle, 
+            vendor: product.vendor, 
+            product_type: 'General',
+            tags: `Supplier:Apify,Cost:${product.originalPrice},SKU:${product.sku},Auto-Sync`,
+            variants: [{
+              price: product.price, 
+              compare_at_price: product.compareAtPrice,
+              sku: product.sku, 
+              inventory_management: 'shopify', 
+              inventory_policy: 'deny'
+            }]
+          };
 
-        const response = await shopifyClient.post('/products.json', { product: shopifyProduct });
-        const createdProduct = response.data.product;
-        addLog(`Created: ${product.title} (£${product.price})`, 'success');
+          const response = await shopifyClient.post('/products.json', { product: shopifyProduct });
+          const createdProduct = response.data.product;
+          addLog(`Created: ${product.title} (£${product.price})`, 'success');
 
-        for (const imageUrl of product.images) {
-          try {
-            await shopifyClient.post(`/products/${createdProduct.id}/images.json`, { image: { src: imageUrl } });
-            await new Promise(resolve => setTimeout(resolve, 200));
-          } catch (imageError) {
-            addLog(`Image failed for ${product.title}`, 'warning');
+          // Add images with longer delays
+          for (const imageUrl of product.images) {
+            try {
+              await shopifyClient.post(`/products/${createdProduct.id}/images.json`, { image: { src: imageUrl } });
+              await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second between images
+            } catch (imageError) {
+              addLog(`Image failed for ${product.title}`, 'warning');
+            }
+          }
+
+          // Set inventory
+          if (createdProduct.variants && createdProduct.variants[0]) {
+            await shopifyClient.post('/inventory_levels/set.json', {
+              location_id: config.shopify.locationId,
+              inventory_item_id: createdProduct.variants[0].inventory_item_id,
+              available: product.inventory
+            });
+          }
+
+          created++;
+          await new Promise(resolve => setTimeout(resolve, 5000)); // 5 seconds between products
+        } catch (error) {
+          errors++;
+          addLog(`Failed to create ${product.title}: ${error.message}`, 'error');
+          
+          // If we hit rate limit, wait longer
+          if (error.response?.status === 429) {
+            addLog('Rate limit hit - waiting 30 seconds', 'warning');
+            await new Promise(resolve => setTimeout(resolve, 30000));
           }
         }
-
-        if (createdProduct.variants && createdProduct.variants[0]) {
-          await shopifyClient.post('/inventory_levels/set.json', {
-            location_id: config.shopify.locationId,
-            inventory_item_id: createdProduct.variants[0].inventory_item_id,
-            available: product.inventory
-          });
-        }
-
-        created++;
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      } catch (error) {
-        errors++;
-        addLog(`Failed to create ${product.title}: ${error.message}`, 'error');
+      }
+      
+      // Wait between batches
+      if (i + batchSize < newProducts.length) {
+        addLog(`Completed batch ${Math.floor(i/batchSize) + 1}, waiting before next batch...`, 'info');
+        await new Promise(resolve => setTimeout(resolve, 10000)); // 10 seconds between batches
       }
     }
 
@@ -216,7 +288,7 @@ async function updateInventory() {
         });
         addLog(`Updated: ${update.title} (${update.currentInventory} → ${update.newInventory})`, 'success');
         updated++;
-        await new Promise(resolve => setTimeout(resolve, 200));
+        await new Promise(resolve => setTimeout(resolve, 500)); // Half second between inventory updates
       } catch (error) {
         errors++;
         addLog(`Failed to update ${update.title}: ${error.message}`, 'error');
@@ -249,7 +321,7 @@ app.get('/', (req, res) => {
     <div class="container mx-auto px-4 py-8">
         <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6 mb-8">
             <h1 class="text-3xl font-bold text-gray-900">Shopify Sync Dashboard</h1>
-            <p class="text-gray-600 mt-1">Automated product synchronization from Apify</p>
+            <p class="text-gray-600 mt-1">Automated product synchronization from Apify with SEO optimization</p>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -283,6 +355,9 @@ app.get('/', (req, res) => {
                 <p class="text-sm text-gray-600">
                     <strong>Automatic Schedule:</strong> Inventory updates every 30 minutes • New products every 6 hours
                 </p>
+                <p class="text-sm text-green-600 mt-1">
+                    <strong>New:</strong> SEO-optimized descriptions with keywords and features
+                </p>
             </div>
         </div>
 
@@ -290,7 +365,7 @@ app.get('/', (req, res) => {
             <h2 class="text-xl font-semibold text-gray-900 mb-4">Activity Log</h2>
             <div class="bg-black rounded-lg p-4 h-64 overflow-y-auto font-mono text-sm" id="logContainer">
                 ${logs.map(log => `
-                    <div class="${log.type === 'success' ? 'text-green-400' : log.type === 'error' ? 'text-red-400' : 'text-gray-300'}">
+                    <div class="${log.type === 'success' ? 'text-green-400' : log.type === 'error' ? 'text-red-400' : log.type === 'warning' ? 'text-yellow-400' : 'text-gray-300'}">
                         [${new Date(log.timestamp).toLocaleTimeString()}] ${log.message}
                     </div>
                 `).join('')}
@@ -318,7 +393,7 @@ app.get('/', (req, res) => {
         function addLogEntry(message, type) {
             const logContainer = document.getElementById('logContainer');
             const time = new Date().toLocaleTimeString();
-            const color = type === 'success' ? 'text-green-400' : type === 'error' ? 'text-red-400' : 'text-gray-300';
+            const color = type === 'success' ? 'text-green-400' : type === 'error' ? 'text-red-400' : type === 'warning' ? 'text-yellow-400' : 'text-gray-300';
             const newLog = \`<div class="\${color}">[\${time}] \${message}</div>\`;
             logContainer.innerHTML = newLog + logContainer.innerHTML;
         }
