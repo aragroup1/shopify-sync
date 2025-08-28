@@ -316,8 +316,18 @@ async function processInventorySync() {
     addLog('Fetching data for inventory updates...', 'info');
 
     // Fetch supplier feed
-    const supplierProducts = await fetchSupplierProducts();
-    addLog(`[Debug] Supplier feed SKUs count: ${supplierProducts.length}`, 'info');
+ async function init() {
+  try {
+    const shopifyProducts = await fetchShopifyProducts();
+    console.log(`Fetched ${shopifyProducts.length} products`);
+    // ... do whatever startup logic is needed
+  } catch (err) {
+    console.error("Startup failed:", err);
+  }
+}
+
+init(); // call it
+
 
     // Fetch Shopify products
     const shopifyProducts = await getShopifyProducts();
