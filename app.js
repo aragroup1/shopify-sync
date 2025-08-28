@@ -47,15 +47,38 @@ const shopifyClient = axios.create({
 
 // Helper functions
 async function getApifyProducts() {
-  const response = await apifyClient.get(
-    `/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=100`
-  );
-  return response.data;
+  let allItems = [];
+  let offset = 0;
+  const limit = 500;
+  while (true) {
+    const response = await apifyClient.get(
+      `/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=${limit}&offset=${offset}`
+    );
+    const items = response.data;
+    allItems.push(...items);
+    if (items.length < limit) break;
+    offset += limit;
+    await new Promise(resolve => setTimeout(resolve, 1000)); // Delay to avoid rate limits
+  }
+  return allItems;
 }
 
 async function getShopifyProducts() {
-  const response = await shopifyClient.get('/products.json?limit=250&fields=id,handle,title,variants,tags');
-  return response.data.products.filter(p => p.tags && p.tags.includes('Supplier:Apify'));
+  let allProducts = [];
+  let sinceId = null;
+  const limit = 250;
+  const fields = 'id,handle,title,variants,tags';
+  while (true) {
+    let url = `/products.json?limit=${limit}&fields=${fields}`;
+    if (sinceId) url += `&since_id=${sinceId}`;
+    const response = await shopifyClient.get(url);
+    const products = response.data.products;
+    allProducts.push(...products);
+    if (products.length < limit) break;
+    sinceId = products[products.length - 1].id;
+    await new Promise(resolve => setTimeout(resolve, 1000)); // Delay to avoid rate limits
+  }
+  return allProducts.filter(p => p.tags && p.tags.includes('Supplier:Apify'));
 }
 
 // Generate SEO-friendly description
