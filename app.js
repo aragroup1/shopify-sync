@@ -8,8 +8,9 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 
 // In-memory storage
-let stats = { newProducts: 0, inventoryUpdates: 0, errors: 0, lastSync: null };
+let stats = { newProducts: 0, inventoryUpdates: 0, discontinued: 0, errors: 0, lastSync: null };
 let logs = [];
+let systemPaused = false;
 
 function addLog(message, type = 'info') {
   const log = { timestamp: new Date().toISOString(), message, type };
@@ -60,6 +61,7 @@ async function getShopifyProducts() {
 // Generate SEO-friendly description
 function generateSEODescription(product) {
   const title = product.title;
+  const price = product.price;
   const originalDescription = product.description || '';
   
   // Extract key features and benefits
@@ -82,7 +84,7 @@ function generateSEODescription(product) {
     seoDescription += `This product is ${features.join(', ')}. `;
   }
   
-  seoDescription += `Order now for fast delivery. `;
+  seoDescription += `Order now for fast delivery. Price: £${price}. `;
   seoDescription += `Shop with confidence at LandOfEssentials - your trusted online retailer for quality products.`;
   
   // Add relevant keywords based on product type
@@ -165,6 +167,11 @@ function processApifyProducts(apifyData) {
 }
 
 async function createNewProducts() {
+  if (systemPaused) {
+    addLog('Product creation skipped - system is paused', 'warning');
+    return { created: 0, errors: 0, total: 0 };
+  }
+
   let created = 0, errors = 0;
   try {
     addLog('Fetching data for product creation...', 'info');
@@ -253,7 +260,61 @@ async function createNewProducts() {
   }
 }
 
-async function updateInventory() {
+async function handleDiscontinuedProducts() {
+  let discontinued = 0, errors = 0;
+  try {
+    addLog('Checking for discontinued products...', 'info');
+    const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]);
+    
+    // Get current Apify product handles
+    const processedApifyProducts = processApifyProducts(apifyData);
+    const currentApifyHandles = new Set(processedApifyProducts.map(p => p.handle));
+    
+    // Find Shopify products with Supplier:Apify tag that are no longer in Apify data
+    const discontinuedProducts = shopifyData.filter(shopifyProduct => 
+      shopifyProduct.tags && 
+      shopifyProduct.tags.includes('Supplier:Apify') && 
+      !currentApifyHandles.has(shopifyProduct.handle)
+    );
+    
+    addLog(`Found ${discontinuedProducts.length} potentially discontinued products`, 'info');
+    
+    for (const product of discontinuedProducts) {
+      try {
+        if (product.variants && product.variants[0]) {
+          const currentInventory = product.variants[0].inventory_quantity || 0;
+          
+          // Only update if inventory is not already 0
+          if (currentInventory > 0) {
+            await shopifyClient.post('/inventory_levels/set.json', {
+              location_id: config.shopify.locationId,
+              inventory_item_id: product.variants[0].inventory_item_id,
+              available: 0
+            });
+            
+            addLog(`Discontinued: ${product.title} (${currentInventory} → 0)`, 'success');
+            discontinued++;
+          } else {
+            addLog(`Already discontinued: ${product.title} (inventory already 0)`, 'info');
+          }
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, 500)); // Rate limiting
+      } catch (error) {
+        errors++;
+        addLog(`Failed to discontinue ${product.title}: ${error.message}`, 'error');
+      }
+    }
+    
+    stats.discontinued += discontinued;
+    addLog(`Discontinued product check completed: ${discontinued} discontinued, ${errors} errors`, discontinued > 0 ? 'success' : 'info');
+    return { discontinued, errors, total: discontinuedProducts.length };
+    
+  } catch (error) {
+    addLog(`Discontinued product workflow failed: ${error.message}`, 'error');
+    return { discontinued, errors: errors + 1, total: 0 };
+  }
+}
   let updated = 0, errors = 0;
   try {
     addLog('Fetching data for inventory updates...', 'info');
@@ -323,7 +384,7 @@ app.get('/', (req, res) => {
             <p class="text-gray-600 mt-1">Automated product synchronization from Apify with SEO optimization</p>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
             <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
                 <h3 class="text-lg font-semibold text-blue-600">New Products</h3>
                 <p class="text-3xl font-bold text-gray-900" id="newProducts">${stats.newProducts}</p>
@@ -333,14 +394,37 @@ app.get('/', (req, res) => {
                 <p class="text-3xl font-bold text-gray-900" id="inventoryUpdates">${stats.inventoryUpdates}</p>
             </div>
             <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+                <h3 class="text-lg font-semibold text-orange-600">Discontinued</h3>
+                <p class="text-3xl font-bold text-gray-900" id="discontinued">${stats.discontinued}</p>
+            </div>
+            <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
                 <h3 class="text-lg font-semibold text-red-600">Errors</h3>
                 <p class="text-3xl font-bold text-gray-900" id="errors">${stats.errors}</p>
             </div>
         </div>
 
         <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6 mb-8">
-            <h2 class="text-xl font-semibold text-gray-900 mb-4">Manual Controls</h2>
-            <div class="flex gap-4">
+            <h2 class="text-xl font-semibold text-gray-900 mb-4">System Controls</h2>
+            
+            <!-- Pause/Resume Toggle -->
+            <div class="mb-4 p-4 rounded-lg ${systemPaused ? 'bg-red-50 border border-red-200' : 'bg-green-50 border border-green-200'}">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="font-medium ${systemPaused ? 'text-red-800' : 'text-green-800'}">
+                            System Status: ${systemPaused ? 'PAUSED' : 'ACTIVE'}
+                        </h3>
+                        <p class="text-sm ${systemPaused ? 'text-red-600' : 'text-green-600'}">
+                            ${systemPaused ? 'Automatic syncing is disabled' : 'Automatic syncing every 30min (inventory) & 6hrs (products)'}
+                        </p>
+                    </div>
+                    <button onclick="togglePause()" 
+                            class="${systemPaused ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'} text-white px-4 py-2 rounded-lg transition-colors">
+                        ${systemPaused ? 'Resume System' : 'Pause System'}
+                    </button>
+                </div>
+            </div>
+            
+            <div class="flex flex-wrap gap-4">
                 <button onclick="triggerSync('products')" 
                         class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors">
                     Create New Products
@@ -349,13 +433,17 @@ app.get('/', (req, res) => {
                         class="bg-green-600 text-white px-6 py-3 rounded-lg hover:bg-green-700 transition-colors">
                     Update Inventory
                 </button>
+                <button onclick="triggerSync('discontinued')" 
+                        class="bg-orange-600 text-white px-6 py-3 rounded-lg hover:bg-orange-700 transition-colors">
+                    Check Discontinued
+                </button>
             </div>
             <div class="mt-4 p-4 bg-gray-50 rounded-lg">
                 <p class="text-sm text-gray-600">
-                    <strong>Automatic Schedule:</strong> Inventory updates every 30 minutes • New products every 6 hours
+                    <strong>Manual controls work even when system is paused</strong>
                 </p>
                 <p class="text-sm text-green-600 mt-1">
-                    <strong>New:</strong> SEO-optimized descriptions with keywords and features
+                    <strong>New:</strong> Discontinued product detection - marks missing supplier products as out of stock
                 </p>
             </div>
         </div>
@@ -374,18 +462,37 @@ app.get('/', (req, res) => {
 
     <script>
         async function triggerSync(type) {
-            const endpoint = type === 'products' ? '/api/sync/products' : '/api/sync/inventory';
+            let endpoint;
+            if (type === 'products') endpoint = '/api/sync/products';
+            else if (type === 'inventory') endpoint = '/api/sync/inventory';
+            else if (type === 'discontinued') endpoint = '/api/sync/discontinued';
+            
             try {
                 const response = await fetch(endpoint, { method: 'POST' });
                 const result = await response.json();
                 if (result.success) {
-                    addLogEntry(\`✅ \${result.message}\`, 'success');
+                    addLogEntry(`✅ ${result.message}`, 'success');
                     setTimeout(() => location.reload(), 2000);
                 } else {
-                    addLogEntry(\`❌ \${result.message || 'Sync failed'}\`, 'error');
+                    addLogEntry(`❌ ${result.message || 'Sync failed'}`, 'error');
                 }
             } catch (error) {
-                addLogEntry(\`❌ Failed to trigger \${type} sync\`, 'error');
+                addLogEntry(`❌ Failed to trigger ${type} sync`, 'error');
+            }
+        }
+
+        async function togglePause() {
+            try {
+                const response = await fetch('/api/pause', { method: 'POST' });
+                const result = await response.json();
+                if (result.success) {
+                    addLogEntry(`🔄 System ${result.paused ? 'paused' : 'resumed'}`, 'info');
+                    setTimeout(() => location.reload(), 1000);
+                } else {
+                    addLogEntry(`❌ Failed to toggle pause`, 'error');
+                }
+            } catch (error) {
+                addLogEntry(`❌ Failed to toggle pause`, 'error');
             }
         }
 
@@ -405,6 +512,7 @@ app.get('/', (req, res) => {
 app.get('/api/status', (req, res) => {
   res.json({
     ...stats,
+    systemPaused,
     logs: logs.slice(0, 10),
     uptime: process.uptime(),
     environment: {
@@ -413,6 +521,12 @@ app.get('/api/status', (req, res) => {
       shopifyDomain: config.shopify.domain || 'MISSING'
     }
   });
+});
+
+app.post('/api/pause', (req, res) => {
+  systemPaused = !systemPaused;
+  addLog(`System ${systemPaused ? 'paused' : 'resumed'}`, 'info');
+  res.json({ success: true, paused: systemPaused });
 });
 
 app.post('/api/sync/products', async (req, res) => {
@@ -437,15 +551,38 @@ app.post('/api/sync/inventory', async (req, res) => {
   }
 });
 
+app.post('/api/sync/discontinued', async (req, res) => {
+  try {
+    addLog('Manual discontinued check triggered', 'info');
+    const result = await handleDiscontinuedProducts();
+    res.json({ success: true, message: `Discontinued ${result.discontinued} products`, data: result });
+  } catch (error) {
+    addLog(`Discontinued check failed: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Scheduled jobs
 cron.schedule('*/30 * * * *', async () => {
+  if (systemPaused) {
+    addLog('Scheduled inventory update skipped - system paused', 'warning');
+    return;
+  }
   addLog('Starting scheduled inventory update', 'info');
   try { await updateInventory(); } catch (error) { addLog(`Scheduled inventory update failed: ${error.message}`, 'error'); }
 });
 
 cron.schedule('0 */6 * * *', async () => {
+  if (systemPaused) {
+    addLog('Scheduled product creation skipped - system paused', 'warning');
+    return;
+  }
   addLog('Starting scheduled product creation', 'info');
-  try { await createNewProducts(); } catch (error) { addLog(`Scheduled product creation failed: ${error.message}`, 'error'); }
+  try { 
+    await createNewProducts(); 
+    // Also run discontinued check after product creation
+    await handleDiscontinuedProducts();
+  } catch (error) { addLog(`Scheduled product creation failed: ${error.message}`, 'error'); }
 });
 
 app.listen(PORT, () => {
@@ -457,65 +594,4 @@ app.listen(PORT, () => {
   if (!config.apify.token) addLog('WARNING: APIFY_TOKEN not set', 'error');
   if (!config.shopify.accessToken) addLog('WARNING: SHOPIFY_ACCESS_TOKEN not set', 'error');
   if (!config.shopify.domain) addLog('WARNING: SHOPIFY_DOMAIN not set', 'error');
-});
-
-
-// Add this new route after your other routes
-app.get('/api/test-inventory', async (req, res) => {
-  try {
-    addLog('TEST: Fetching data for inventory comparison...', 'info');
-    const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]);
-    
-    const processedProducts = processApifyProducts(apifyData);
-    const shopifyMap = new Map(shopifyData.map(p => [p.handle, p]));
-    
-    const debugInfo = {
-      apifyProductCount: processedProducts.length,
-      shopifyProductCount: shopifyData.length,
-      matchedProducts: [],
-      unmatchedApifyProducts: [],
-      inventoryComparisons: []
-    };
-    
-    processedProducts.forEach(apifyProduct => {
-      const shopifyProduct = shopifyMap.get(apifyProduct.handle);
-      
-      if (shopifyProduct && shopifyProduct.variants && shopifyProduct.variants[0]) {
-        const currentInventory = shopifyProduct.variants[0].inventory_quantity || 0;
-        const apifyInventory = apifyProduct.inventory;
-        
-        debugInfo.matchedProducts.push({
-          handle: apifyProduct.handle,
-          title: shopifyProduct.title,
-          shopifyInventory: currentInventory,
-          apifyInventory: apifyInventory,
-          needsUpdate: currentInventory !== apifyInventory
-        });
-        
-        debugInfo.inventoryComparisons.push({
-          product: apifyProduct.handle,
-          shopify: currentInventory,
-          apify: apifyInventory,
-          different: currentInventory !== apifyInventory
-        });
-      } else {
-        debugInfo.unmatchedApifyProducts.push(apifyProduct.handle);
-      }
-    });
-    
-    const updatesNeeded = debugInfo.inventoryComparisons.filter(comp => comp.different);
-    
-    addLog(`TEST: Found ${updatesNeeded.length} inventory updates needed`, 'info');
-    
-    res.json({
-      success: true,
-      debug: debugInfo,
-      updatesNeeded: updatesNeeded.length,
-      sampleComparisons: debugInfo.inventoryComparisons.slice(0, 10) // First 10 for inspection
-    });
-    
-  } catch (error) {
-    addLog(`TEST: Inventory test failed: ${error.message}`, 'error');
-    res.status(500).json({ success: false, error: error.message });
-  }
 });
