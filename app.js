@@ -458,3 +458,64 @@ app.listen(PORT, () => {
   if (!config.shopify.accessToken) addLog('WARNING: SHOPIFY_ACCESS_TOKEN not set', 'error');
   if (!config.shopify.domain) addLog('WARNING: SHOPIFY_DOMAIN not set', 'error');
 });
+
+
+// Add this new route after your other routes
+app.get('/api/test-inventory', async (req, res) => {
+  try {
+    addLog('TEST: Fetching data for inventory comparison...', 'info');
+    const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]);
+    
+    const processedProducts = processApifyProducts(apifyData);
+    const shopifyMap = new Map(shopifyData.map(p => [p.handle, p]));
+    
+    const debugInfo = {
+      apifyProductCount: processedProducts.length,
+      shopifyProductCount: shopifyData.length,
+      matchedProducts: [],
+      unmatchedApifyProducts: [],
+      inventoryComparisons: []
+    };
+    
+    processedProducts.forEach(apifyProduct => {
+      const shopifyProduct = shopifyMap.get(apifyProduct.handle);
+      
+      if (shopifyProduct && shopifyProduct.variants && shopifyProduct.variants[0]) {
+        const currentInventory = shopifyProduct.variants[0].inventory_quantity || 0;
+        const apifyInventory = apifyProduct.inventory;
+        
+        debugInfo.matchedProducts.push({
+          handle: apifyProduct.handle,
+          title: shopifyProduct.title,
+          shopifyInventory: currentInventory,
+          apifyInventory: apifyInventory,
+          needsUpdate: currentInventory !== apifyInventory
+        });
+        
+        debugInfo.inventoryComparisons.push({
+          product: apifyProduct.handle,
+          shopify: currentInventory,
+          apify: apifyInventory,
+          different: currentInventory !== apifyInventory
+        });
+      } else {
+        debugInfo.unmatchedApifyProducts.push(apifyProduct.handle);
+      }
+    });
+    
+    const updatesNeeded = debugInfo.inventoryComparisons.filter(comp => comp.different);
+    
+    addLog(`TEST: Found ${updatesNeeded.length} inventory updates needed`, 'info');
+    
+    res.json({
+      success: true,
+      debug: debugInfo,
+      updatesNeeded: updatesNeeded.length,
+      sampleComparisons: debugInfo.inventoryComparisons.slice(0, 10) // First 10 for inspection
+    });
+    
+  } catch (error) {
+    addLog(`TEST: Inventory test failed: ${error.message}`, 'error');
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
