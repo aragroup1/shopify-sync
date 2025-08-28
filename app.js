@@ -307,6 +307,103 @@ async function handleDiscontinuedProducts() {
   }
 }
 
+// Process inventory sync
+async function processInventorySync() {
+  log('Manual inventory sync triggered');
+
+  try {
+    log('Fetching data for inventory updates...');
+
+    // Fetch supplier feed
+    const supplierProducts = await fetchSupplierProducts(); 
+    log(`[Debug] Supplier feed SKUs count: ${supplierProducts.length}`);
+    console.log('[Debug] First 5 supplier SKUs:', supplierProducts.slice(0, 5).map(p => p.sku));
+
+    // Fetch Shopify products
+    const shopifyProducts = await fetchShopifyProducts(); 
+    log(`[Debug] Shopify SKUs count: ${shopifyProducts.length}`);
+    console.log('[Debug] First 5 Shopify SKUs:', shopifyProducts.slice(0, 5).map(p => p.sku));
+    
+    async function fetchShopifyProducts() {
+  try {
+    const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-04/products.json?limit=250`, {
+      headers: {
+        "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+        "Content-Type": "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Shopify API error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    
+    console.log('[Debug] Raw Shopify response count:', data.products?.length || 0);
+    if (data.products?.length > 0) {
+      console.log('[Debug] First 2 Shopify products:', data.products.slice(0, 2));
+    }
+
+    // Map products to your SKU format
+    const products = [];
+    data.products.forEach(p => {
+      p.variants.forEach(v => {
+        products.push({
+          sku: v.sku,
+          stock: v.inventory_quantity,
+          productId: p.id,
+          variantId: v.id,
+        });
+      });
+    });
+
+    console.log('[Debug] Processed Shopify SKUs count:', products.length);
+    return products;
+
+  } catch (err) {
+    console.error('[Error] Failed to fetch Shopify products:', err.message);
+    return [];
+  }
+}
+const shopifyProducts = await fetchShopifyProducts();
+log(`[Debug] Shopify SKUs count: ${shopifyProducts.length}`);
+if (shopifyProducts.length === 0) {
+  log('[Error] Shopify product fetch returned 0 SKUs. Discontinue logic will treat everything as missing!', 'error');
+} else {
+  console.log('[Debug] First 10 Shopify SKUs:', shopifyProducts.slice(0, 10).map(p => p.sku));
+}
+
+    // Compare inventories
+    const updates = compareInventories(supplierProducts, shopifyProducts);
+    log(`[Debug] Updates detected: ${updates.length}`);
+    if (updates.length > 0) {
+      console.log('[Debug] Sample updates:', updates.slice(0, 5));
+    }
+
+    log(`Found ${updates.length} inventory updates needed`);
+
+    // Apply updates if any
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (const update of updates) {
+      try {
+        await updateShopifyInventory(update);
+        successCount++;
+        log(`Updated SKU ${update.sku} → ${update.newStock}`, 'success');
+      } catch (err) {
+        errorCount++;
+        log(`Error updating SKU ${update.sku}: ${err.message}`, 'error');
+      }
+    }
+
+    log(`Inventory update completed: ${successCount} updated, ${errorCount} errors`);
+  } catch (err) {
+    log(`Inventory sync failed: ${err.message}`, 'error');
+    console.error(err);
+  }
+}
+
 async function updateInventory() {
   if (systemPaused) {
     addLog('Inventory update skipped - system is paused', 'warning');
