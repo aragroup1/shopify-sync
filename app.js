@@ -307,99 +307,6 @@ async function handleDiscontinuedProducts() {
   }
 }
 
-// Process inventory sync
-// Manual inventory sync function (works with getShopifyProducts + existing helpers)
-async function processInventorySync() {
-  addLog('Manual inventory sync triggered', 'info');
-
-  try {
-    addLog('Fetching data for inventory updates...', 'info');
-
-    // Fetch supplier feed
- async function init() {
-  try {
-    const shopifyProducts = await fetchShopifyProducts();
-    console.log(`Fetched ${shopifyProducts.length} products`);
-    // ... do whatever startup logic is needed
-  } catch (err) {
-    console.error("Startup failed:", err);
-  }
-}
-
-init(); // call it
-
-
-    // Fetch Shopify products
-    const shopifyProducts = await getShopifyProducts();
-    addLog(`[Debug] Shopify SKUs count: ${shopifyProducts.length}`, 'info');
-
-    // Compare inventories
-    const updates = compareInventories(supplierProducts, shopifyProducts);
-    addLog(`Found ${updates.length} inventory updates needed`, 'info');
-
-    // Apply updates
-    let successCount = 0, errorCount = 0;
-    for (const update of updates) {
-      try {
-        await updateShopifyInventory(update);
-        successCount++;
-        addLog(`Updated SKU ${update.sku} → ${update.newStock}`, 'success');
-      } catch (err) {
-        errorCount++;
-        addLog(`Error updating SKU ${update.sku}: ${err.message}`, 'error');
-      }
-    }
-
-    addLog(
-      `Inventory sync completed: ${successCount} updated, ${errorCount} errors`,
-      'info'
-    );
-  } catch (err) {
-    addLog(`Inventory sync failed: ${err.message}`, 'error');
-    console.error(err);
-  }
-}
-
-
-const shopifyProducts = await fetchShopifyProducts();
-log(`[Debug] Shopify SKUs count: ${shopifyProducts.length}`);
-if (shopifyProducts.length === 0) {
-  log('[Error] Shopify product fetch returned 0 SKUs. Discontinue logic will treat everything as missing!', 'error');
-} else {
-  console.log('[Debug] First 10 Shopify SKUs:', shopifyProducts.slice(0, 10).map(p => p.sku));
-}
-
-    // Compare inventories
-    const updates = compareInventories(supplierProducts, shopifyProducts);
-    log(`[Debug] Updates detected: ${updates.length}`);
-    if (updates.length > 0) {
-      console.log('[Debug] Sample updates:', updates.slice(0, 5));
-    }
-
-    log(`Found ${updates.length} inventory updates needed`);
-
-    // Apply updates if any
-    let successCount = 0;
-    let errorCount = 0;
-
-    for (const update of updates) {
-      try {
-        await updateShopifyInventory(update);
-        successCount++;
-        log(`Updated SKU ${update.sku} → ${update.newStock}`, 'success');
-      } catch (err) {
-        errorCount++;
-        log(`Error updating SKU ${update.sku}: ${err.message}`, 'error');
-      }
-    }
-
-    log(`Inventory update completed: ${successCount} updated, ${errorCount} errors`);
-  } catch (err) {
-    log(`Inventory sync failed: ${err.message}`, 'error');
-    console.error(err);
-  }
-}
-
 async function updateInventory() {
   if (systemPaused) {
     addLog('Inventory update skipped - system is paused', 'warning');
@@ -410,7 +317,15 @@ async function updateInventory() {
   try {
     addLog('Fetching data for inventory updates...', 'info');
     const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]);
+    addLog(`[Debug] Shopify products count: ${shopifyData.length}`, 'info');
+    if (shopifyData.length === 0) {
+      addLog('[Error] Shopify product fetch returned 0 products. Inventory update may be incomplete!', 'error');
+    } else {
+      console.log('[Debug] First 10 Shopify products:', shopifyData.slice(0, 10).map(p => p.handle));
+    }
+    addLog(`[Debug] Apify products count: ${apifyData.length}`, 'info');
     const processedProducts = processApifyProducts(apifyData);
+    addLog(`[Debug] Processed Apify products: ${processedProducts.length}`, 'info');
     const shopifyMap = new Map(shopifyData.map(p => [p.handle, p]));
     
     const inventoryUpdates = [];
@@ -429,6 +344,9 @@ async function updateInventory() {
     });
 
     addLog(`Found ${inventoryUpdates.length} inventory updates needed`, 'info');
+    if (inventoryUpdates.length > 0) {
+      console.log('[Debug] Sample updates:', inventoryUpdates.slice(0, 5));
+    }
 
     for (const update of inventoryUpdates) {
       try {
