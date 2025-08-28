@@ -469,13 +469,13 @@ app.get('/', (req, res) => {
                 const response = await fetch(endpoint, { method: 'POST' });
                 const result = await response.json();
                 if (result.success) {
-                    addLogEntry(`✅ ${result.message}`, 'success');
+                    addLogEntry(\`✅ \${result.message}\`, 'success');
                     setTimeout(() => location.reload(), 2000);
                 } else {
-                    addLogEntry(`❌ ${result.message || 'Sync failed'}`, 'error');
+                    addLogEntry(\`❌ \${result.message || 'Sync failed'}\`, 'error');
                 }
             } catch (error) {
-                addLogEntry(`❌ Failed to trigger ${type} sync`, 'error');
+                addLogEntry(\`❌ Failed to trigger \${type} sync\`, 'error');
             }
         }
 
@@ -484,13 +484,13 @@ app.get('/', (req, res) => {
                 const response = await fetch('/api/pause', { method: 'POST' });
                 const result = await response.json();
                 if (result.success) {
-                    addLogEntry(`🔄 System ${result.paused ? 'paused' : 'resumed'}`, 'info');
+                    addLogEntry(\`🔄 System \${result.paused ? 'paused' : 'resumed'}\`, 'info');
                     setTimeout(() => location.reload(), 1000);
                 } else {
-                    addLogEntry(`❌ Failed to toggle pause`, 'error');
+                    addLogEntry(\`❌ Failed to toggle pause\`, 'error');
                 }
             } catch (error) {
-                addLogEntry(`❌ Failed to toggle pause`, 'error');
+                addLogEntry(\`❌ Failed to toggle pause\`, 'error');
             }
         }
 
@@ -504,6 +504,8 @@ app.get('/', (req, res) => {
     </script>
 </body>
 </html>
+  `);
+});
   `);
 });
 
