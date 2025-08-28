@@ -60,7 +60,6 @@ async function getShopifyProducts() {
 // Generate SEO-friendly description
 function generateSEODescription(product) {
   const title = product.title;
-  const price = product.price;
   const originalDescription = product.description || '';
   
   // Extract key features and benefits
@@ -83,7 +82,7 @@ function generateSEODescription(product) {
     seoDescription += `This product is ${features.join(', ')}. `;
   }
   
-  seoDescription += `Order now for fast delivery. Price: £${price}. `;
+  seoDescription += `Order now for fast delivery. `;
   seoDescription += `Shop with confidence at LandOfEssentials - your trusted online retailer for quality products.`;
   
   // Add relevant keywords based on product type
