@@ -163,6 +163,38 @@ function generateSEODescription(product) {
   return seoDescription;
 }
 
+function extractHandleFromCanonicalUrl(item, index) {
+  // Debug logging
+  if (index < 3) {
+    addLog(`Debug product ${index}: canonicalUrl="${item.canonicalUrl}", title="${item.title}"`, 'info');
+  }
+  
+  if (item.canonicalUrl) {
+    const handle = item.canonicalUrl.replace('https://www.manchesterwholesale.co.uk/products/', '');
+    
+    if (index < 3) {
+      addLog(`  After URL removal: "${handle}"`, 'info');
+    }
+    
+    if (handle && handle !== item.canonicalUrl && handle.length > 0) {
+      return handle;
+    }
+  }
+  
+  // Fallback to title-based handle
+  const titleForHandle = item.title || `product-${index}`;
+  const fallbackHandle = titleForHandle.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .substring(0, 50);
+    
+  if (index < 3) {
+    addLog(`  Using fallback handle: "${fallbackHandle}"`, 'info');
+  }
+  
+  return fallbackHandle;
+}
+
 function processApifyProducts(apifyData) {
   return apifyData.map((item, index) => {
     const handle = extractHandleFromCanonicalUrl(item, index);
