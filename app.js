@@ -511,9 +511,11 @@ async function updateInventory() {
     let matchedByHandle = 0;
     let matchedByTitle = 0;
     let matchedBySku = 0;
+    let matchedByPartial = 0;
     let skippedNoVariants = 0;
     let skippedSameInventory = 0;
     let skippedUnreliableZero = 0;
+    let skippedNoInventoryItemId = 0;
     const inventoryUpdates = [];
     const debugSample = [];
     
@@ -557,14 +559,13 @@ async function updateInventory() {
         // Try to find a product whose handle contains our handle or vice versa
         const handleParts = apifyProduct.handle.split('-').filter(p => p.length > 3);
         for (const [shopifyHandle, product] of shopifyHandleMap) {
-          let isMatch = false;
           // Check if handles share significant parts
           if (handleParts.length > 2) {
             const matchingParts = handleParts.filter(part => shopifyHandle.includes(part));
             if (matchingParts.length >= handleParts.length * 0.6) {
               shopifyProduct = product;
               matchType = 'partial-handle';
-              isMatch = true;
+              matchedByPartial++;
               break;
             }
           }
@@ -602,6 +603,15 @@ async function updateInventory() {
         return;
       }
       
+      // Check if we have inventory_item_id
+      if (!shopifyProduct.variants[0].inventory_item_id) {
+        skippedNoInventoryItemId++;
+        if (index < 20) {
+          addLog(`No inventory_item_id for: ${shopifyProduct.title}`, 'warning');
+        }
+        return;
+      }
+      
       const currentInventory = shopifyProduct.variants[0].inventory_quantity || 0;
       const targetInventory = apifyProduct.inventory;
       
@@ -621,7 +631,8 @@ async function updateInventory() {
         currentInventory,
         newInventory: targetInventory,
         inventoryItemId: shopifyProduct.variants[0].inventory_item_id,
-        matchType
+        matchType,
+        productId: shopifyProduct.id
       });
       
       if (inventoryUpdates.length <= 5) {
@@ -640,20 +651,49 @@ async function updateInventory() {
     addLog(`- Matched by handle: ${matchedByHandle}`, 'info');
     addLog(`- Matched by SKU: ${matchedBySku}`, 'info');
     addLog(`- Matched by title: ${matchedByTitle}`, 'info');
+    addLog(`- Matched by partial: ${matchedByPartial}`, 'info');
     addLog(`Skipped (no variants): ${skippedNoVariants}`, 'info');
+    addLog(`Skipped (no inventory_item_id): ${skippedNoInventoryItemId}`, 'info');
     addLog(`Skipped (same inventory): ${skippedSameInventory}`, 'info');
     addLog(`Skipped (unreliable zero): ${skippedUnreliableZero}`, 'info');
     addLog(`Updates needed: ${inventoryUpdates.length}`, 'info');
     addLog(`Mismatches: ${processedProducts.length - matchedCount}`, 'warning');
 
-    // Process updates
+    // Verify location ID is set
+    if (!config.shopify.locationId) {
+      addLog('ERROR: SHOPIFY_LOCATION_ID environment variable is not set!', 'error');
+      return { updated: 0, created: 0, errors: 1, total: inventoryUpdates.length };
+    }
+
+    // Process updates with better error handling
     for (const update of inventoryUpdates) {
       try {
+        // First, verify the inventory level exists
+        const checkResponse = await shopifyClient.get(
+          `/inventory_levels.json?inventory_item_ids=${update.inventoryItemId}&location_ids=${config.shopify.locationId}`
+        ).catch(err => null);
+        
+        if (!checkResponse || !checkResponse.data.inventory_levels || checkResponse.data.inventory_levels.length === 0) {
+          // Need to connect the inventory item to the location first
+          try {
+            await shopifyClient.post('/inventory_levels/connect.json', {
+              location_id: parseInt(config.shopify.locationId),
+              inventory_item_id: update.inventoryItemId
+            });
+            addLog(`Connected inventory item to location for: ${update.title}`, 'info');
+            await new Promise(resolve => setTimeout(resolve, 250));
+          } catch (connectErr) {
+            // Item might already be connected, continue
+          }
+        }
+        
+        // Now update the inventory
         await shopifyClient.post('/inventory_levels/set.json', {
-          location_id: config.shopify.locationId,
+          location_id: parseInt(config.shopify.locationId),
           inventory_item_id: update.inventoryItemId,
           available: update.newInventory
         });
+        
         addLog(`✓ Updated: ${update.title} (${update.currentInventory} → ${update.newInventory}) [${update.matchType}]`, 'success');
         updated++;
         stats.inventoryUpdates++;
@@ -661,13 +701,41 @@ async function updateInventory() {
       } catch (error) {
         errors++;
         stats.errors++;
-        addLog(`✗ Failed: ${update.title} - ${error.message}`, 'error');
+        
+        // Log detailed error information
+        if (error.response) {
+          const errorDetails = error.response.data?.errors || error.response.data?.error || error.message;
+          addLog(`✗ Failed: ${update.title} - Status ${error.response.status}: ${JSON.stringify(errorDetails)}`, 'error');
+          
+          if (error.response.status === 422) {
+            addLog(`  → Inventory Item ID: ${update.inventoryItemId}, Location ID: ${config.shopify.locationId}`, 'error');
+          }
+        } else {
+          addLog(`✗ Failed: ${update.title} - ${error.message}`, 'error');
+        }
+        
+        // Add delay after errors to avoid rate limiting
+        if (error.response?.status === 429) {
+          addLog('Rate limit hit - waiting 30 seconds', 'warning');
+          await new Promise(resolve => setTimeout(resolve, 30000));
+        } else {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
       }
     }
 
     stats.lastSync = new Date().toISOString();
     addLog(`=== INVENTORY UPDATE COMPLETE ===`, 'info');
-    addLog(`Result: ${updated} updated, ${errors} errors`, updated > 0 ? 'success' : 'info');
+    addLog(`Result: ${updated} updated, ${errors} errors out of ${inventoryUpdates.length} attempts`, updated > 0 ? 'success' : 'info');
+    
+    // If we had many errors, suggest checking configuration
+    if (errors > inventoryUpdates.length * 0.5) {
+      addLog('⚠️ High error rate detected. Please verify:', 'warning');
+      addLog(`  - SHOPIFY_LOCATION_ID is correct: ${config.shopify.locationId}`, 'warning');
+      addLog('  - Products have inventory tracking enabled', 'warning');
+      addLog('  - API permissions include inventory management', 'warning');
+    }
+    
     return { updated, created: 0, errors, total: inventoryUpdates.length };
   } catch (error) {
     addLog(`Inventory update workflow failed: ${error.message}`, 'error');
@@ -1101,6 +1169,24 @@ app.get('/api/status', (req, res) => {
 
 app.get('/api/mismatches', (req, res) => {
   res.json({ mismatches });
+});
+
+app.get('/api/locations', async (req, res) => {
+  try {
+    const response = await shopifyClient.get('/locations.json');
+    const locations = response.data.locations;
+    
+    res.json({
+      currentLocationId: config.shopify.locationId,
+      availableLocations: locations.map(loc => ({
+        id: loc.id,
+        name: loc.name,
+        active: loc.active
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.get('/api/diagnose', async (req, res) => {
