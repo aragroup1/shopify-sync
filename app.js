@@ -16,326 +16,6 @@ let mismatches = []; // Store unmatched products for reporting
 function addLog(message, type = 'info') {
   const log = { timestamp: new Date().toISOString(), message, type };
   logs.unshift(log);
-  if (logs.length > 50) logs = logs.slice(0, 50);
-  console.log(`[${log.timestamp}] ${message}`);
-}
-
-// Configuration
-const config = {
-  apify: {
-    token: process.env.APIFY_TOKEN,
-    actorId: process.env.APIFY_ACTOR_ID || 'autofacts~shopify',
-    baseUrl: 'https://api.apify.com/v2',
-    urlPrefix: process.env.URL_PREFIX || 'https://www.manchesterwholesale.co.uk/products/'
-  },
-  shopify: {
-    domain: process.env.SHOPIFY_DOMAIN,
-    accessToken: process.env.SHOPIFY_ACCESS_TOKEN,
-    locationId: process.env.SHOPIFY_LOCATION_ID,
-    baseUrl: `https://${process.env.SHOPIFY_DOMAIN}/admin/api/2024-01`
-  }
-};
-
-// API clients
-const apifyClient = axios.create({ baseURL: config.apify.baseUrl, timeout: 120000 });
-const shopifyClient = axios.create({
-  baseURL: config.shopify.baseUrl,
-  headers: {
-    'X-Shopify-Access-Token': config.shopify.accessToken,
-    'Content-Type': 'application/json'
-  },
-  timeout: 120000
-});
-
-// Helper functions
-async function getApifyProducts() {
-  let allItems = [];
-  let offset = 0;
-  let pageCount = 0;
-  const limit = 500;
-  
-  addLog('Starting Apify product fetch...', 'info');
-  
-  while (true) {
-    try {
-      const response = await apifyClient.get(
-        `/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=${limit}&offset=${offset}`
-      );
-      const items = response.data;
-      allItems.push(...items);
-      pageCount++;
-      
-      addLog(`Apify page ${pageCount}: fetched ${items.length} products (total: ${allItems.length})`, 'info');
-      
-      if (items.length < limit) break;
-      offset += limit;
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    } catch (error) {
-      addLog(`Apify fetch error: ${error.message}`, 'error');
-      stats.errors++;
-      throw error;
-    }
-  }
-  
-  addLog(`Apify fetch complete: ${allItems.length} total products`, 'info');
-  if (allItems.length > 0) {
-    addLog(`Sample Apify products: ${allItems.slice(0, 3).map(p => `${p.title} (${p.sku || 'no-sku'})`).join(', ')}`, 'info');
-  }
-  
-  return allItems;
-}
-
-async function getShopifyProducts() {
-  let allProducts = [];
-  let sinceId = null;
-  let pageCount = 0;
-  const limit = 250;
-  const fields = 'id,handle,title,variants,tags';
-  
-  addLog('Starting Shopify product fetch...', 'info');
-  
-  while (true) {
-    try {
-      let url = `/products.json?limit=${limit}&fields=${fields}`; // Remove tag filter for debugging
-      if (sinceId) url += `&since_id=${sinceId}`;
-      
-      const response = await shopifyClient.get(url);
-      const products = response.data.products;
-      allProducts.push(...products);
-      pageCount++;
-      
-      addLog(`Shopify page ${pageCount}: fetched ${products.length} products (total: ${allProducts.length})`, 'info');
-      
-      if (products.length < limit) break;
-      sinceId = products[products.length - 1].id;
-      await new Promise(resolve => setTimeout(resolve, 500));
-    } catch (error) {
-      addLog(`Shopify fetch error: ${error.message}`, 'error');
-      stats.errors++;
-      throw error;
-    }
-  }
-  
-  // Filter for Supplier:Apify after fetching
-  const filteredProducts = allProducts.filter(p => p.tags && p.tags.includes('Supplier:Apify'));
-  addLog(`Shopify fetch complete: ${allProducts.length} total products, ${filteredProducts.length} with Supplier:Apify tag`, 'info');
-  if (filteredProducts.length > 0) {
-    addLog(`Sample Shopify products: ${filteredProducts.slice(0, 3).map(p => `${p.handle} (inv: ${p.variants?.[0]?.inventory_quantity || 'N/A'})`).join(', ')}`, 'info');
-  }
-  
-  return filteredProducts;
-}
-
-function normalizeHandle(input, index, isTitle = false) {
-  let handle = input;
-  
-  if (!isTitle && handle && handle !== 'undefined') {
-    handle = handle.replace(config.apify.urlPrefix, '');
-    handle = handle.replace(/\.html$/, ''); // Remove .html extension if present
-    if (handle !== input && handle.length > 0) {
-      if (index < 3) addLog(`Handle from URL: "${input}" → "${handle}"`, 'info');
-      return handle.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '');
-    }
-  }
-  
-  // Fallback to title-based handle
-  handle = (isTitle ? input : `product-${index}`).toLowerCase()
-    .replace(/\b\d{4}\b/g, '') // Remove 4-digit years
-    .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '') // Remove suffixes
-    .replace(/\s*\(.*?\)\s*/g, '') // Remove anything in parentheses
-    .replace(/[^a-z0-9]+/g, '-') // Replace non-alphanumeric with dash
-    .replace(/^-|-$/g, ''); // Trim leading/trailing dashes
-  
-  if (index < 3) addLog(`Fallback handle: "${input}" → "${handle}"`, 'info');
-  
-  return handle;
-}
-
-function extractHandleFromCanonicalUrl(item, index) {
-  const urlFields = [item.canonicalUrl, item.url, item.productUrl, item.source?.url];
-  const validUrl = urlFields.find(url => url && url !== 'undefined');
-  
-  if (index < 3) {
-    addLog(`Debug product ${index}: canonicalUrl="${item.canonicalUrl}", url="${item.url}", productUrl="${item.productUrl}", title="${item.title}"`, 'info');
-  }
-  
-  return normalizeHandle(validUrl || item.title, index, !validUrl);
-}
-
-function generateSEODescription(product) {
-  const title = product.title;
-  const originalDescription = product.description || '';
-  
-  const features = [];
-  if (title.toLowerCase().includes('halloween')) features.push('perfect for Halloween celebrations');
-  if (title.toLowerCase().includes('kids') || title.toLowerCase().includes('children')) features.push('designed for children');
-  if (title.toLowerCase().includes('game') || title.toLowerCase().includes('puzzle')) features.push('entertaining and educational');
-  if (title.toLowerCase().includes('mask')) features.push('comfortable and easy to wear');
-  if (title.toLowerCase().includes('decoration')) features.push('enhances any space');
-  if (title.toLowerCase().includes('toy')) features.push('safe and durable construction');
-  
-  let seoDescription = `${title} - Premium quality ${title.toLowerCase()} available at LandOfEssentials. `;
-  
-  if (originalDescription && originalDescription.length > 20) {
-    seoDescription += `${originalDescription.substring(0, 150)}... `;
-  }
-  
-  if (features.length > 0) {
-    seoDescription += `This product is ${features.join(', ')}. `;
-  }
-  
-  seoDescription += `Order now for fast delivery. `;
-  seoDescription += `Shop with confidence at LandOfEssentials - your trusted online retailer for quality products.`;
-  
-  const keywords = [];
-  if (title.toLowerCase().includes('halloween')) keywords.push('halloween costumes', 'party supplies', 'trick or treat');
-  if (title.toLowerCase().includes('game')) keywords.push('family games', 'entertainment', 'fun activities');
-  if (title.toLowerCase().includes('decoration')) keywords.push('home decor', 'decorative items', 'interior design');
-  if (title.toLowerCase().includes('toy')) keywords.push('children toys', 'educational toys', 'safe toys');
-  
-  if (keywords.length > 0) {
-    seoDescription += ` Perfect for: ${keywords.join(', ')}.`;
-  }
-  
-  return seoDescription;
-}
-
-function processApifyProducts(apifyData) {
-  return apifyData.map((item, index) => {
-    const handle = extractHandleFromCanonicalUrl(item, index);
-    if (!handle) return null;
-
-    let price = 0;
-    if (item.variants && item.variants.length > 0) {
-      const variant = item.variants[0];
-      if (variant.price) {
-        price = typeof variant.price === 'object' ? parseFloat(variant.price.current || 0) : parseFloat(variant.price);
-      }
-    }
-    if (price === 0) price = parseFloat(item.price || 0);
-    if (price > 100) price = price / 100;
-
-    let finalPrice = 0;
-    if (price <= 1) finalPrice = price + 6;
-    else if (price <= 2) finalPrice = price + 7;
-    else if (price <= 3) finalPrice = price + 8;
-    else if (price <= 5) finalPrice = price + 9;
-    else if (price <= 8) finalPrice = price + 10;
-    else if (price <= 15) finalPrice = price * 2;
-    else finalPrice = price * 2.2;
-
-    if (finalPrice === 0) { price = 5.00; finalPrice = 15.00; }
-    if (finalPrice > 100) {
-      addLog(`Price capped for ${item.title}: ${finalPrice.toFixed(2)} → 100.00`, 'warning');
-      finalPrice = 100.00;
-    }
-
-    let cleanTitle = item.title || 'Untitled Product';
-    cleanTitle = cleanTitle.replace(/\b\d{4}\b/g, '')
-      .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
-      .replace(/\s*\(.*?\)\s*/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    const images = [];
-    if (item.medias && Array.isArray(item.medias)) {
-      for (let i = 0; i < Math.min(3, item.medias.length); i++) {
-        if (item.medias[i] && item.medias[i].url) {
-          images.push(item.medias[i].url);
-        }
-      }
-    }
-
-    let inventory = item.variants?.[0]?.stockQuantity || item.stock || 10;
-    const stockStatus = item.variants?.[0]?.price?.stockStatus;
-    if (stockStatus === 'OUT_OF_STOCK') {
-      inventory = 0;
-    } else if (stockStatus === 'IN_STOCK' && inventory === 0) {
-      inventory = 10; // Ensure non-zero if in stock
-    }
-
-    if (index < 5) {
-      addLog(`Inventory debug for ${cleanTitle}: stockQuantity=${item.variants?.[0]?.stockQuantity}, stock=${item.stock}, stockStatus=${stockStatus}, final=${inventory}`, 'info');
-      addLog(`Price debug for ${cleanTitle}: base=${price.toFixed(2)}, final=${finalPrice.toFixed(2)}`, 'info');
-    }
-
-    const productData = {
-      handle, title: cleanTitle,
-      description: item.description || `${cleanTitle}\n\nHigh-quality product from LandOfEssentials.`,
-      sku: item.sku || '', originalPrice: price.toFixed(2), price: finalPrice.toFixed(2),
-      compareAtPrice: (finalPrice * 1.2).toFixed(2), inventory, images, vendor: 'LandOfEssentials'
-    };
-
-    productData.seoDescription = generateව
-
-System: I apologize for the interruption, but it seems the code was cut off due to length constraints. Let me address the matching issue directly and provide a complete solution to ensure accurate product matching. I'll focus on refining the handle normalization, enhancing inventory logic, and adding robust debugging to pinpoint why products are still mismatching, as indicated by the logs showing many inventory updates to 0. I'll also include the enhanced CSS with a mismatch report section and loading overlay as promised.
-
----
-
-### Final Root Cause Analysis
-Based on the logs and your feedback, the matching issue likely stems from:
-1. **Handle Normalization Inconsistencies**:
-   - The `normalizeHandle` function may not fully account for all variations in Apify’s `canonicalUrl` or title formats, leading to mismatches. For example, special characters, extra spaces, or unhandled suffixes (beyond "Parcel Rate" etc.) may persist.
-   - The logs don’t show "No Shopify match" errors for the 47 products updated to 0 inventory, suggesting they were matched but with incorrect inventory data, possibly due to subtle handle differences.
-
-2. **Inventory Logic Overriding**:
-   - The `processApifyProducts` function sets inventory to 0 if `stockStatus !== 'IN_STOCK'`, which may be too aggressive if `stockStatus` is missing, inconsistent, or has unexpected values (e.g., `'out of stock'`, `null`).
-   - The default inventory of 20 in Shopify being reset to 0 indicates that Apify’s data is overriding valid Shopify inventory.
-
-3. **Incomplete Shopify Product Fetch**:
-   - Although `getShopifyProducts` was updated to fetch all products with `tags=Supplier:Apify`, the logs don’t confirm the total number fetched. If pagination misses products, matches fail, leading to new product creation or skipped updates.
-
----
-
-### Final Fixes
-1. **Enhanced Handle Normalization**:
-   - Strengthen `normalizeHandle` to remove all non-alphanumeric characters (except dashes), trim whitespace, and handle additional edge cases (e.g., `.html` extensions, parentheses).
-   - Add case-insensitive matching and log all handles (Apify and Shopify) for unmatched products.
-   - Create a mismatch report stored in `mismatches` array, displayed in the dashboard.
-
-2. **Improved Inventory Logic**:
-   - Prioritize `stockQuantity` or `stock` over `stockStatus`.
-   - Skip zero-inventory updates unless `stockStatus === 'OUT_OF_STOCK'` and log the decision.
-   - Add a configurable minimum inventory threshold (e.g., 10) if Apify data is unreliable.
-
-3. **Robust Shopify Fetch**:
-   - Remove the `tags=Supplier:Apify` filter temporarily to fetch all Shopify products, ensuring no products are missed.
-   - Log total products fetched and compare with expected counts.
-
-4. **Debugging Enhancements**:
-   - Log raw Apify and Shopify handles for all products (not just the first few) when mismatches occur.
-   - Store mismatch details (title, URL, generated handle) in `mismatches` array for dashboard display.
-   - Add a debug route (`/api/mismatches`) to retrieve mismatch data.
-
-5. **CSS Enhancements**:
-   - Add a mismatch report table in the dashboard with sortable columns (title, Apify handle, Shopify handle).
-   - Include a loading overlay with a spinner during sync operations.
-   - Maintain the modern look with gradients, dark mode, and animations.
-
----
-
-### Updated Code
-Below is the complete, revised `server.js` with all fixes implemented. The code includes enhanced handle normalization, improved inventory logic, detailed mismatch debugging, and an upgraded dashboard with a mismatch report and loading overlay.
-
-<xaiArtifact artifact_id="060f9ed0-838d-4d35-9276-0c72c9e1e322" artifact_version_id="223628e3-b235-468f-b5e1-95f14d7d29d4" title="server.js" contentType="text/javascript">
-const express = require('express');
-const axios = require('axios');
-const cron = require('node-cron');
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.use(express.json());
-
-// In-memory storage
-let stats = { newProducts: 0, inventoryUpdates: 0, discontinued: 0, errors: 0, lastSync: null };
-let logs = [];
-let systemPaused = false;
-let mismatches = []; // Store unmatched products for reporting
-
-function addLog(message, type = 'info') {
-  const log = { timestamp: new Date().toISOString(), message, type };
-  logs.unshift(log);
   if (logs.length > 100) logs = logs.slice(0, 100); // Increased log limit
   console.log(`[${log.timestamp}] ${message}`);
 }
@@ -866,30 +546,50 @@ app.get('/', (req, res) => {
     <style>
         body {
             transition: background-color 0.3s, color 0.3s;
+            background: linear-gradient(to bottom right, #f3f4f6, #e5e7eb);
         }
         .dark body {
             background-color: #1f2937;
+            background: linear-gradient(to bottom right, #111827, #1f2937);
         }
         .gradient-bg {
-            background: linear-gradient(135deg, #6ee7b7 0%, #3b82f6 100%);
+            background: linear-gradient(135deg, #ff9a9e 0%, #fad0c4 99%, #fad0c4 100%);
+            box-shadow: 0 10px 20px rgba(255, 154, 158, 0.3);
+        }
+        .card-hover {
+            transition: all 0.3s ease-in-out;
+            box-shadow: 8px 8px 16px #d1d9e6, -8px -8px 16px #f9f9f9;
+            background: rgba(255, 255, 255, 0.8);
+            backdrop-filter: blur(10px);
+        }
+        .dark .card-hover {
+            box-shadow: 8px 8px 16px #141a25, -8px -8px 16px #2a3648;
+            background: rgba(31, 41, 55, 0.8);
+            backdrop-filter: blur(10px);
         }
         .card-hover:hover {
-            transform: translateY(-4px);
-            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+            transform: translateY(-6px) scale(1.02);
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.2);
         }
         .btn-hover {
-            transition: all 0.3s ease;
-            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease-in-out;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
         }
         .btn-hover:hover {
-            transform: scale(1.05);
-            box-shadow: 0 0 15px rgba(0, 0, 0, 0.2);
+            transform: scale(1.08);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
         }
         .fade-in {
-            animation: fadeIn 0.5s ease-in;
+            animation: fadeIn 0.5s ease-in-out;
         }
         @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
+            from { opacity: 0; transform: translateY(20px); }
             to { opacity: 1; transform: translateY(0); }
         }
         .spinner {
@@ -924,7 +624,7 @@ app.get('/', (req, res) => {
         }
         .loading-spinner {
             border: 8px solid rgba(255, 255, 255, 0.3);
-            border-top: 8px solid #3b82f6;
+            border-top: 8px solid #ff9a9e;
             border-radius: 50%;
             width: 60px;
             height: 60px;
@@ -932,12 +632,20 @@ app.get('/', (req, res) => {
         }
         .mismatch-table th {
             cursor: pointer;
+            transition: background-color 0.3s;
         }
         .mismatch-table th:hover {
             background-color: #f3f4f6;
         }
         .dark .mismatch-table th:hover {
             background-color: #374151;
+        }
+        .log-container {
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.2);
+            transition: box-shadow 0.3s;
+        }
+        .log-container:hover {
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.3);
         }
     </style>
 </head>
@@ -955,25 +663,25 @@ app.get('/', (req, res) => {
         </div>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-            <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-md p-6 card-hover fade-in">
+            <div class="rounded-2xl p-6 card-hover fade-in">
                 <h3 class="text-lg font-semibold text-blue-500 dark:text-blue-400">New Products</h3>
                 <p class="text-3xl font-bold text-gray-900 dark:text-gray-100" id="newProducts">${stats.newProducts}</p>
             </div>
-            <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-md p-6 card-hover fade-in">
+            <div class="rounded-2xl p-6 card-hover fade-in">
                 <h3 class="text-lg font-semibold text-green-500 dark:text-green-400">Inventory Updates</h3>
                 <p class="text-3xl font-bold text-gray-900 dark:text-gray-100" id="inventoryUpdates">${stats.inventoryUpdates}</p>
             </div>
-            <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-md p-6 card-hover fade-in">
+            <div class="rounded-2xl p-6 card-hover fade-in">
                 <h3 class="text-lg font-semibold text-orange-500 dark:text-orange-400">Discontinued</h3>
                 <p class="text-3xl font-bold text-gray-900 dark:text-gray-100" id="discontinued">${stats.discontinued}</p>
             </div>
-            <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-md p-6 card-hover fade-in">
+            <div class="rounded-2xl p-6 card-hover fade-in">
                 <h3 class="text-lg font-semibold text-red-500 dark:text-red-400">Errors</h3>
                 <p class="text-3xl font-bold text-gray-900 dark:text-gray-100" id="errors">${stats.errors}</p>
             </div>
         </div>
 
-        <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-md p-6 mb-8 fade-in">
+        <div class="rounded-2xl p-6 card-hover mb-8 fade-in">
             <h2 class="text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-4">System Controls</h2>
             <div class="mb-6 p-4 rounded-lg ${systemPaused ? 'bg-red-100 dark:bg-red-900 border-red-300 dark:border-red-700' : 'bg-green-100 dark:bg-green-900 border-green-300 dark:border-green-700'} border">
                 <div class="flex items-center justify-between">
@@ -1008,13 +716,13 @@ app.get('/', (req, res) => {
                     <div id="discontinuedSpinner" class="spinner"></div>
                 </div>
             </div>
-            <div class="mt-4 p-4 bg-gray-100 dark:bg-gray-700 rounded-lg">
+            <div class="mt-4 p-4 rounded-lg bg-gray-100 dark:bg-gray-700">
                 <p class="text-sm text-gray-600 dark:text-gray-400"><strong>Manual controls work even when system is paused</strong></p>
                 <p class="text-sm text-blue-600 dark:text-blue-400 mt-1"><strong>Updated:</strong> Enhanced handle matching and mismatch reporting</p>
             </div>
         </div>
 
-        <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-md p-6 mb-8 fade-in">
+        <div class="rounded-2xl p-6 card-hover mb-8 fade-in">
             <h2 class="text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-4">Mismatch Report</h2>
             <div class="overflow-x-auto">
                 <table class="mismatch-table w-full text-sm text-left text-gray-500 dark:text-gray-400">
@@ -1040,7 +748,7 @@ app.get('/', (req, res) => {
             </div>
         </div>
 
-        <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-md p-6 fade-in">
+        <div class="rounded-2xl p-6 card-hover fade-in log-container">
             <h2 class="text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-4">Activity Log</h2>
             <div class="bg-gray-900 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm" id="logContainer">
                 ${logs.map(log => 
