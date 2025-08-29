@@ -110,19 +110,44 @@ async function getShopifyProducts() {
 }
 
 function extractHandleFromCanonicalUrl(item, index) {
-  if (item.canonicalUrl) {
-    const handle = item.canonicalUrl.replace('https://www.manchesterwholesale.co.uk/products/', '');
+  // Check multiple possible field names for the canonical URL
+  const canonicalUrl = item.canonicalUrl || item['source/canonicalUrl'] || item.source?.canonicalUrl;
+  
+  // Debug logging for first 3 products
+  if (index < 3) {
+    addLog(`Debug product ${index}: canonicalUrl="${canonicalUrl}", title="${item.title}"`, 'info');
+    if (item.source) {
+      addLog(`  Source object: ${JSON.stringify(item.source)}`, 'info');
+    }
+  }
+  
+  if (canonicalUrl && canonicalUrl !== 'undefined') {
+    const handle = canonicalUrl.replace('https://www.manchesterwholesale.co.uk/products/', '');
     
-    if (handle && handle !== item.canonicalUrl && handle.length > 0) {
+    if (index < 3) {
+      addLog(`  After URL removal: "${handle}"`, 'info');
+    }
+    
+    if (handle && handle !== canonicalUrl && handle.length > 0) {
+      if (index < 3) {
+        addLog(`  Using canonical URL handle: "${handle}"`, 'info');
+      }
       return handle;
     }
   }
   
+  // Fallback to title-based handle
   const titleForHandle = item.title || `product-${index}`;
-  return titleForHandle.toLowerCase()
+  const fallbackHandle = titleForHandle.toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
     .substring(0, 50);
+    
+  if (index < 3) {
+    addLog(`  Using fallback handle: "${fallbackHandle}"`, 'info');
+  }
+  
+  return fallbackHandle;
 }
 
 function generateSEODescription(product) {
