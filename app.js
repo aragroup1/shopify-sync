@@ -12,12 +12,87 @@ let stats = { newProducts: 0, inventoryUpdates: 0, discontinued: 0, errors: 0, l
 let logs = [];
 let systemPaused = false;
 let mismatches = [];
+let failsafeTriggered = false;
+let failsafeReason = '';
+
+// Failsafe configuration
+const FAILSAFE_LIMITS = {
+  MIN_APIFY_PRODUCTS: 100, // Minimum expected Apify products
+  MIN_SHOPIFY_PRODUCTS: 100, // Minimum expected Shopify products
+  MAX_CHANGE_PERCENTAGE: 30, // Maximum % of products that can change in one sync
+  MAX_ERROR_RATE: 20, // Maximum error rate percentage
+  MAX_DISCONTINUED_AT_ONCE: 100, // Maximum products to discontinue in one run
+  MAX_PRICE_CHANGES: 50, // Maximum price changes in one run
+  FETCH_TIMEOUT: 300000 // 5 minutes timeout for fetches
+};
+
+// Track last known good state
+let lastKnownGoodState = {
+  apifyCount: 0,
+  shopifyCount: 0,
+  timestamp: null
+};
 
 function addLog(message, type = 'info') {
   const log = { timestamp: new Date().toISOString(), message, type };
   logs.unshift(log);
   if (logs.length > 100) logs = logs.slice(0, 100);
   console.log(`[${log.timestamp}] ${message}`);
+}
+
+// Failsafe check function
+function checkFailsafeConditions(context, data = {}) {
+  const checks = [];
+  
+  switch(context) {
+    case 'fetch':
+      if (data.apifyCount < FAILSAFE_LIMITS.MIN_APIFY_PRODUCTS) {
+        checks.push(`Apify products too low: ${data.apifyCount} < ${FAILSAFE_LIMITS.MIN_APIFY_PRODUCTS}`);
+      }
+      if (data.shopifyCount < FAILSAFE_LIMITS.MIN_SHOPIFY_PRODUCTS) {
+        checks.push(`Shopify products too low: ${data.shopifyCount} < ${FAILSAFE_LIMITS.MIN_SHOPIFY_PRODUCTS}`);
+      }
+      // Check for dramatic changes from last known good state
+      if (lastKnownGoodState.apifyCount > 0) {
+        const changePercent = Math.abs((data.apifyCount - lastKnownGoodState.apifyCount) / lastKnownGoodState.apifyCount * 100);
+        if (changePercent > FAILSAFE_LIMITS.MAX_CHANGE_PERCENTAGE) {
+          checks.push(`Apify product count changed by ${changePercent.toFixed(1)}% (was ${lastKnownGoodState.apifyCount}, now ${data.apifyCount})`);
+        }
+      }
+      break;
+      
+    case 'inventory':
+      if (data.updatesNeeded > data.totalProducts * (FAILSAFE_LIMITS.MAX_CHANGE_PERCENTAGE / 100)) {
+        checks.push(`Too many inventory changes: ${data.updatesNeeded} > ${Math.floor(data.totalProducts * (FAILSAFE_LIMITS.MAX_CHANGE_PERCENTAGE / 100))}`);
+      }
+      if (data.errorRate > FAILSAFE_LIMITS.MAX_ERROR_RATE) {
+        checks.push(`Error rate too high: ${data.errorRate.toFixed(1)}% > ${FAILSAFE_LIMITS.MAX_ERROR_RATE}%`);
+      }
+      break;
+      
+    case 'discontinued':
+      if (data.toDiscontinue > FAILSAFE_LIMITS.MAX_DISCONTINUED_AT_ONCE) {
+        checks.push(`Too many products to discontinue: ${data.toDiscontinue} > ${FAILSAFE_LIMITS.MAX_DISCONTINUED_AT_ONCE}`);
+      }
+      break;
+      
+    case 'products':
+      if (data.toCreate > data.existingCount * (FAILSAFE_LIMITS.MAX_CHANGE_PERCENTAGE / 100)) {
+        checks.push(`Too many new products: ${data.toCreate} > ${Math.floor(data.existingCount * (FAILSAFE_LIMITS.MAX_CHANGE_PERCENTAGE / 100))}`);
+      }
+      break;
+  }
+  
+  if (checks.length > 0) {
+    failsafeTriggered = true;
+    failsafeReason = checks.join('; ');
+    systemPaused = true;
+    addLog(`⚠️ FAILSAFE TRIGGERED: ${failsafeReason}`, 'error');
+    addLog('System automatically paused to prevent potential damage', 'error');
+    return false;
+  }
+  
+  return true;
 }
 
 // Configuration
@@ -36,18 +111,22 @@ const config = {
   }
 };
 
-// API clients
-const apifyClient = axios.create({ baseURL: config.apify.baseUrl, timeout: 120000 });
+// API clients with timeout
+const apifyClient = axios.create({ 
+  baseURL: config.apify.baseUrl, 
+  timeout: FAILSAFE_LIMITS.FETCH_TIMEOUT 
+});
+
 const shopifyClient = axios.create({
   baseURL: config.shopify.baseUrl,
   headers: {
     'X-Shopify-Access-Token': config.shopify.accessToken,
     'Content-Type': 'application/json'
   },
-  timeout: 120000
+  timeout: FAILSAFE_LIMITS.FETCH_TIMEOUT
 });
 
-// Helper functions
+// Helper functions with failsafe
 async function getApifyProducts() {
   let allItems = [];
   let offset = 0;
@@ -56,8 +135,8 @@ async function getApifyProducts() {
   
   addLog('Starting Apify product fetch...', 'info');
   
-  while (true) {
-    try {
+  try {
+    while (true) {
       const response = await apifyClient.get(
         `/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=${limit}&offset=${offset}`
       );
@@ -70,16 +149,24 @@ async function getApifyProducts() {
       if (items.length < limit) break;
       offset += limit;
       await new Promise(resolve => setTimeout(resolve, 1000));
-    } catch (error) {
-      addLog(`Apify fetch error: ${error.message}`, 'error');
-      stats.errors++;
-      throw error;
     }
+  } catch (error) {
+    addLog(`Apify fetch error: ${error.message}`, 'error');
+    stats.errors++;
+    
+    // Trigger failsafe on fetch error
+    failsafeTriggered = true;
+    failsafeReason = `Apify fetch failed: ${error.message}`;
+    systemPaused = true;
+    addLog('⚠️ FAILSAFE: System paused due to Apify fetch failure', 'error');
+    throw error;
   }
   
   addLog(`Apify fetch complete: ${allItems.length} total products`, 'info');
-  if (allItems.length > 0) {
-    addLog(`Sample Apify products: ${allItems.slice(0, 3).map(p => `${p.title} (${p.sku || 'no-sku'})`).join(', ')}`, 'info');
+  
+  // Check failsafe conditions
+  if (!checkFailsafeConditions('fetch', { apifyCount: allItems.length })) {
+    throw new Error('Failsafe triggered: Apify product count anomaly');
   }
   
   return allItems;
@@ -94,8 +181,8 @@ async function getShopifyProducts() {
   
   addLog('Starting Shopify product fetch...', 'info');
   
-  while (true) {
-    try {
+  try {
+    while (true) {
       let url = `/products.json?limit=${limit}&fields=${fields}`;
       if (sinceId) url += `&since_id=${sinceId}`;
       
@@ -109,17 +196,25 @@ async function getShopifyProducts() {
       if (products.length < limit) break;
       sinceId = products[products.length - 1].id;
       await new Promise(resolve => setTimeout(resolve, 500));
-    } catch (error) {
-      addLog(`Shopify fetch error: ${error.message}`, 'error');
-      stats.errors++;
-      throw error;
     }
+  } catch (error) {
+    addLog(`Shopify fetch error: ${error.message}`, 'error');
+    stats.errors++;
+    
+    // Trigger failsafe on fetch error
+    failsafeTriggered = true;
+    failsafeReason = `Shopify fetch failed: ${error.message}`;
+    systemPaused = true;
+    addLog('⚠️ FAILSAFE: System paused due to Shopify fetch failure', 'error');
+    throw error;
   }
   
   const filteredProducts = allProducts.filter(p => p.tags && p.tags.includes('Supplier:Apify'));
   addLog(`Shopify fetch complete: ${allProducts.length} total products, ${filteredProducts.length} with Supplier:Apify tag`, 'info');
-  if (filteredProducts.length > 0) {
-    addLog(`Sample Shopify products: ${filteredProducts.slice(0, 5).map(p => `${p.handle} (inv: ${p.variants?.[0]?.inventory_quantity || 'N/A'})`).join(', ')}`, 'info');
+  
+  // Check failsafe conditions
+  if (!checkFailsafeConditions('fetch', { shopifyCount: filteredProducts.length })) {
+    throw new Error('Failsafe triggered: Shopify product count anomaly');
   }
   
   return filteredProducts;
@@ -143,7 +238,13 @@ function normalizeHandle(input, index, isTitle = false) {
     }
   }
   
-  handle = (isTitle ? input : `product-${index}`).toLowerCase()
+  let baseText = (isTitle ? input : `product-${index}`);
+  
+  if (/^\d+$/.test(baseText.trim()) || baseText.trim().length < 3) {
+    baseText = `product-${baseText.trim()}`;
+  }
+  
+  handle = baseText.toLowerCase()
     .replace(/\b\d{4}\b/g, '')
     .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
     .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
@@ -151,7 +252,11 @@ function normalizeHandle(input, index, isTitle = false) {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
   
-  if (index < 5) addLog(`Fallback handle: "${input}" → "${handle}"`, 'info');
+  if (!handle || handle === '-' || handle.length < 2) {
+    handle = `product-${index}-${Date.now()}`;
+  }
+  
+  if (index < 5) addLog(`Generated handle: "${input}" → "${handle}"`, 'info');
   
   return handle;
 }
@@ -164,7 +269,13 @@ function extractHandleFromCanonicalUrl(item, index) {
     addLog(`Debug product ${index}: canonicalUrl="${item.canonicalUrl}", url="${item.url}", productUrl="${item.productUrl}", title="${item.title}"`, 'info');
   }
   
-  return normalizeHandle(validUrl || item.title, index, !validUrl);
+  const handle = normalizeHandle(validUrl || item.title || `product-${index}`, index, !validUrl);
+  
+  if (!handle) {
+    return `product-${index}-${Date.now()}`;
+  }
+  
+  return handle;
 }
 
 function generateSEODescription(product) {
@@ -214,7 +325,6 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
       return null;
     }
 
-    // Clean title
     let cleanTitle = item.title || 'Untitled Product';
     cleanTitle = cleanTitle.replace(/\b\d{4}\b/g, '')
       .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
@@ -222,7 +332,6 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
       .replace(/\s+/g, ' ')
       .trim();
 
-    // Process inventory
     let inventory = item.variants?.[0]?.stockQuantity || item.stock || 20;
     const stockStatus = item.variants?.[0]?.price?.stockStatus;
     if (stockStatus === 'OUT_OF_STOCK') {
@@ -235,13 +344,11 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
       addLog(`Inventory debug for ${cleanTitle}: stockQuantity=${item.variants?.[0]?.stockQuantity || 'N/A'}, stock=${item.stock || 'N/A'}, stockStatus=${stockStatus || 'N/A'}, final=${inventory}`, 'info');
     }
 
-    // Process price only if needed
     let price = 0;
     let finalPrice = 0;
     let compareAtPrice = 0;
     
     if (options.processPrice) {
-      // Extract price from various possible locations
       if (item.variants && item.variants.length > 0) {
         const variant = item.variants[0];
         if (variant.price) {
@@ -250,24 +357,19 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
       }
       if (price === 0) price = parseFloat(item.price || 0);
       
-      // Improved currency detection
       const originalPrice = price;
       
-      // If price has decimals and is less than 10, it's likely already in pounds
       if (price > 0 && price < 10 && price.toString().includes('.')) {
-        // Already in pounds, no conversion needed
         if (index < 5) {
           addLog(`Price appears to be in pounds already: ${price}`, 'info');
         }
       } 
-      // If price is a whole number > 50, it's likely in pence
       else if (price > 50 && !price.toString().includes('.')) {
         price = price / 100;
         if (index < 5) {
           addLog(`Price converted from pence: ${originalPrice} → ${price}`, 'info');
         }
       }
-      // If price > 1000, definitely pence
       else if (price > 1000) {
         price = price / 100;
         if (index < 5) {
@@ -275,7 +377,6 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
         }
       }
       
-      // Apply markup based on price ranges
       if (price <= 1) finalPrice = price + 6;
       else if (price <= 2) finalPrice = price + 7;
       else if (price <= 3) finalPrice = price + 8;
@@ -287,7 +388,6 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
       else if (price <= 75) finalPrice = price * 1.6;
       else finalPrice = price * 1.4;
 
-      // Ensure minimum price
       if (finalPrice === 0 || finalPrice < 5) { 
         addLog(`Minimum price applied for ${item.title}: ${price.toFixed(2)} → 15.00`, 'warning');
         price = 5.00; 
@@ -301,7 +401,6 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
       }
     }
 
-    // Process images
     const images = [];
     if (item.medias && Array.isArray(item.medias)) {
       for (let i = 0; i < Math.min(3, item.medias.length); i++) {
@@ -335,6 +434,15 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
 async function createNewProducts(productsToCreate) {
   if (systemPaused) {
     addLog('Product creation skipped - system is paused', 'warning');
+    return { created: 0, errors: 0, total: productsToCreate.length };
+  }
+
+  // Failsafe check
+  const shopifyData = await getShopifyProducts();
+  if (!checkFailsafeConditions('products', { 
+    toCreate: productsToCreate.length, 
+    existingCount: shopifyData.length 
+  })) {
     return { created: 0, errors: 0, total: productsToCreate.length };
   }
 
@@ -424,6 +532,11 @@ async function handleDiscontinuedProducts() {
     
     addLog(`Found ${discontinuedProducts.length} potentially discontinued products`, 'info');
     
+    // Failsafe check
+    if (!checkFailsafeConditions('discontinued', { toDiscontinue: discontinuedProducts.length })) {
+      return { discontinued: 0, errors: 0, total: discontinuedProducts.length };
+    }
+    
     for (const product of discontinuedProducts) {
       try {
         if (product.variants && product.variants[0]) {
@@ -471,20 +584,26 @@ async function updateInventory() {
     addLog('=== STARTING INVENTORY UPDATE WORKFLOW ===', 'info');
     const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]);
     
+    // Update last known good state if fetch was successful
+    if (apifyData.length > FAILSAFE_LIMITS.MIN_APIFY_PRODUCTS && 
+        shopifyData.length > FAILSAFE_LIMITS.MIN_SHOPIFY_PRODUCTS) {
+      lastKnownGoodState = {
+        apifyCount: apifyData.length,
+        shopifyCount: shopifyData.length,
+        timestamp: new Date().toISOString()
+      };
+    }
+    
     addLog(`Data comparison: ${apifyData.length} Apify products vs ${shopifyData.length} Shopify products`, 'info');
     
-    // Process products WITHOUT price processing for inventory updates
     const processedProducts = processApifyProducts(apifyData, { processPrice: false });
     addLog(`Processed ${processedProducts.length} valid Apify products after filtering`, 'info');
     
-    // Create multiple lookup maps for better matching
     const shopifyHandleMap = new Map(shopifyData.map(p => [p.handle.toLowerCase(), p]));
     const shopifyTitleMap = new Map();
     const shopifySkuMap = new Map();
     
-    // Build additional maps for fallback matching
     shopifyData.forEach(product => {
-      // Clean title for matching
       const cleanTitle = product.title.toLowerCase()
         .replace(/\b\d{4}\b/g, '')
         .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
@@ -493,13 +612,11 @@ async function updateInventory() {
         .trim();
       shopifyTitleMap.set(cleanTitle, product);
       
-      // Map by SKU if available
       if (product.variants && product.variants[0] && product.variants[0].sku) {
         shopifySkuMap.set(product.variants[0].sku.toLowerCase(), product);
       }
       
-      // Also try alternative handle formats
-      const altHandle = product.handle.replace(/-\d+$/, ''); // Remove trailing numbers
+      const altHandle = product.handle.replace(/-\d+$/, '');
       if (altHandle !== product.handle) {
         shopifyHandleMap.set(altHandle.toLowerCase(), product);
       }
@@ -523,14 +640,12 @@ async function updateInventory() {
       let shopifyProduct = null;
       let matchType = '';
       
-      // Try to match by handle first
       shopifyProduct = shopifyHandleMap.get(apifyProduct.handle.toLowerCase());
       if (shopifyProduct) {
         matchType = 'handle';
         matchedByHandle++;
       }
       
-      // Try to match by SKU if handle didn't work
       if (!shopifyProduct && apifyProduct.sku) {
         shopifyProduct = shopifySkuMap.get(apifyProduct.sku.toLowerCase());
         if (shopifyProduct) {
@@ -539,7 +654,6 @@ async function updateInventory() {
         }
       }
       
-      // Try to match by cleaned title if still no match
       if (!shopifyProduct) {
         const cleanApifyTitle = apifyProduct.title.toLowerCase()
           .replace(/\b\d{4}\b/g, '')
@@ -554,12 +668,9 @@ async function updateInventory() {
         }
       }
       
-      // Try partial handle match as last resort
       if (!shopifyProduct) {
-        // Try to find a product whose handle contains our handle or vice versa
         const handleParts = apifyProduct.handle.split('-').filter(p => p.length > 3);
         for (const [shopifyHandle, product] of shopifyHandleMap) {
-          // Check if handles share significant parts
           if (handleParts.length > 2) {
             const matchingParts = handleParts.filter(part => shopifyHandle.includes(part));
             if (matchingParts.length >= handleParts.length * 0.6) {
@@ -572,7 +683,6 @@ async function updateInventory() {
         }
       }
       
-      // Log debug info for first few products
       if (index < 10) {
         debugSample.push({
           apifyTitle: apifyProduct.title,
@@ -585,7 +695,7 @@ async function updateInventory() {
       }
       
       if (!shopifyProduct) {
-        if (mismatches.length < 100) { // Only store first 100 mismatches
+        if (mismatches.length < 100) {
           mismatches.push({
             apifyTitle: apifyProduct.title,
             apifyHandle: apifyProduct.handle,
@@ -603,7 +713,6 @@ async function updateInventory() {
         return;
       }
       
-      // Check if we have inventory_item_id
       if (!shopifyProduct.variants[0].inventory_item_id) {
         skippedNoInventoryItemId++;
         if (index < 20) {
@@ -640,7 +749,6 @@ async function updateInventory() {
       }
     });
     
-    // Log debug sample
     addLog('=== MATCHING DEBUG SAMPLE ===', 'info');
     debugSample.forEach(item => {
       addLog(`${item.matched ? '✓' : '✗'} ${item.apifyTitle} | Handle: ${item.apifyHandle} | SKU: ${item.apifySku || 'none'} | Match: ${item.matchType} | Shopify: ${item.shopifyHandle}`, item.matched ? 'info' : 'warning');
@@ -659,22 +767,28 @@ async function updateInventory() {
     addLog(`Updates needed: ${inventoryUpdates.length}`, 'info');
     addLog(`Mismatches: ${processedProducts.length - matchedCount}`, 'warning');
 
-    // Verify location ID is set
+    // Failsafe check before updating
+    const errorRate = errors > 0 ? (errors / inventoryUpdates.length * 100) : 0;
+    if (!checkFailsafeConditions('inventory', {
+      updatesNeeded: inventoryUpdates.length,
+      totalProducts: processedProducts.length,
+      errorRate
+    })) {
+      return { updated: 0, created: 0, errors: 0, total: inventoryUpdates.length };
+    }
+
     if (!config.shopify.locationId) {
       addLog('ERROR: SHOPIFY_LOCATION_ID environment variable is not set!', 'error');
       return { updated: 0, created: 0, errors: 1, total: inventoryUpdates.length };
     }
 
-    // Process updates with better error handling
     for (const update of inventoryUpdates) {
       try {
-        // First, verify the inventory level exists
         const checkResponse = await shopifyClient.get(
           `/inventory_levels.json?inventory_item_ids=${update.inventoryItemId}&location_ids=${config.shopify.locationId}`
         ).catch(err => null);
         
         if (!checkResponse || !checkResponse.data.inventory_levels || checkResponse.data.inventory_levels.length === 0) {
-          // Need to connect the inventory item to the location first
           try {
             await shopifyClient.post('/inventory_levels/connect.json', {
               location_id: parseInt(config.shopify.locationId),
@@ -683,11 +797,10 @@ async function updateInventory() {
             addLog(`Connected inventory item to location for: ${update.title}`, 'info');
             await new Promise(resolve => setTimeout(resolve, 250));
           } catch (connectErr) {
-            // Item might already be connected, continue
+            // Item might already be connected
           }
         }
         
-        // Now update the inventory
         await shopifyClient.post('/inventory_levels/set.json', {
           location_id: parseInt(config.shopify.locationId),
           inventory_item_id: update.inventoryItemId,
@@ -702,7 +815,6 @@ async function updateInventory() {
         errors++;
         stats.errors++;
         
-        // Log detailed error information
         if (error.response) {
           const errorDetails = error.response.data?.errors || error.response.data?.error || error.message;
           addLog(`✗ Failed: ${update.title} - Status ${error.response.status}: ${JSON.stringify(errorDetails)}`, 'error');
@@ -714,7 +826,6 @@ async function updateInventory() {
           addLog(`✗ Failed: ${update.title} - ${error.message}`, 'error');
         }
         
-        // Add delay after errors to avoid rate limiting
         if (error.response?.status === 429) {
           addLog('Rate limit hit - waiting 30 seconds', 'warning');
           await new Promise(resolve => setTimeout(resolve, 30000));
@@ -728,7 +839,6 @@ async function updateInventory() {
     addLog(`=== INVENTORY UPDATE COMPLETE ===`, 'info');
     addLog(`Result: ${updated} updated, ${errors} errors out of ${inventoryUpdates.length} attempts`, updated > 0 ? 'success' : 'info');
     
-    // If we had many errors, suggest checking configuration
     if (errors > inventoryUpdates.length * 0.5) {
       addLog('⚠️ High error rate detected. Please verify:', 'warning');
       addLog(`  - SHOPIFY_LOCATION_ID is correct: ${config.shopify.locationId}`, 'warning');
@@ -932,6 +1042,14 @@ app.get('/', (req, res) => {
         .dark .log-container {
             background: rgba(17, 24, 39, 0.95);
         }
+        .failsafe-alert {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.02); }
+            100% { transform: scale(1); }
+        }
     </style>
 </head>
 <body class="min-h-screen font-sans transition-colors">
@@ -968,18 +1086,57 @@ app.get('/', (req, res) => {
 
         <div class="rounded-2xl p-6 card-hover mb-8 fade-in">
             <h2 class="text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-4">System Controls</h2>
+            
+            ${failsafeTriggered ? `
+            <div class="mb-4 p-4 rounded-lg bg-red-100 dark:bg-red-900 border-2 border-red-500 failsafe-alert">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="font-bold text-red-800 dark:text-red-300">
+                            🚨 FAILSAFE TRIGGERED
+                        </h3>
+                        <p class="text-sm text-red-600 dark:text-red-400">
+                            ${failsafeReason}
+                        </p>
+                    </div>
+                    <button onclick="clearFailsafe()" 
+                            class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg btn-hover">
+                        Clear Failsafe
+                    </button>
+                </div>
+            </div>
+            ` : ''}
+            
+            ${mismatches.length > 100 ? `
+            <div class="mb-4 p-4 rounded-lg bg-yellow-100 dark:bg-yellow-900 border border-yellow-300 dark:border-yellow-700">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="font-medium text-yellow-800 dark:text-yellow-300">
+                            ⚠️ ${mismatches.length} Unmatched Products
+                        </h3>
+                        <p class="text-sm text-yellow-600 dark:text-yellow-400">
+                            These Apify products don't exist in Shopify yet. Create them to sync inventory.
+                        </p>
+                    </div>
+                    <button onclick="triggerSync('mismatches')" 
+                            class="bg-yellow-500 hover:bg-yellow-600 text-white px-4 py-2 rounded-lg btn-hover">
+                        Create First 50
+                    </button>
+                </div>
+            </div>
+            ` : ''}
+            
             <div class="mb-6 p-4 rounded-lg ${systemPaused ? 'bg-red-100 dark:bg-red-900 border-red-300 dark:border-red-700' : 'bg-green-100 dark:bg-green-900 border-green-300 dark:border-green-700'} border">
                 <div class="flex items-center justify-between">
                     <div>
-                        <h3 class="font-medium ${systemPaused ? 'text-red-800 dark:text-red-300' : 'text-green-800 dark:text-green-300'}">
+                        <h3 class="font-medium ${systemPaused ? 'text-red-800 dark:text-red-300' : 'text-green-800 dark:text-green-300'}" id="systemStatus">
                             System Status: ${systemPaused ? 'PAUSED' : 'ACTIVE'}
                         </h3>
-                        <p class="text-sm ${systemPaused ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}">
+                        <p class="text-sm ${systemPaused ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}" id="systemStatusDesc">
                             ${systemPaused ? 'Automatic syncing is disabled' : 'Automatic syncing every 30min (inventory) & 6hrs (products)'}
                         </p>
                     </div>
                     <div class="flex items-center">
-                        <button onclick="togglePause()" 
+                        <button onclick="togglePause()" id="pauseButton"
                                 class="${systemPaused ? 'bg-green-500 hover:bg-green-600' : 'bg-red-500 hover:bg-red-600'} text-white px-4 py-2 rounded-lg btn-hover">
                             ${systemPaused ? 'Resume System' : 'Pause System'}
                         </button>
@@ -987,6 +1144,7 @@ app.get('/', (req, res) => {
                     </div>
                 </div>
             </div>
+            
             <div class="flex flex-wrap gap-4">
                 <div class="flex items-center">
                     <button onclick="triggerSync('products')" class="bg-blue-500 text-white px-6 py-3 rounded-lg btn-hover">Create New Products</button>
@@ -1000,10 +1158,22 @@ app.get('/', (req, res) => {
                     <button onclick="triggerSync('discontinued')" class="bg-orange-500 text-white px-6 py-3 rounded-lg btn-hover">Check Discontinued</button>
                     <div id="discontinuedSpinner" class="spinner"></div>
                 </div>
+                ${mismatches.length > 0 ? `
+                <div class="flex items-center">
+                    <button onclick="triggerSync('mismatches')" class="bg-yellow-500 text-white px-6 py-3 rounded-lg btn-hover">Create from Mismatches</button>
+                    <div id="mismatchesSpinner" class="spinner"></div>
+                </div>
+                ` : ''}
             </div>
+            
             <div class="mt-4 p-4 rounded-lg bg-gray-100 dark:bg-gray-700">
-                <p class="text-sm text-gray-600 dark:text-gray-400"><strong>Manual controls work even when system is paused</strong></p>
-                <p class="text-sm text-blue-600 dark:text-blue-400 mt-1"><strong>Updated:</strong> Fixed price detection for decimal values</p>
+                <p class="text-sm text-gray-600 dark:text-gray-400"><strong>Failsafe Protection Active:</strong></p>
+                <ul class="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                    <li>• Auto-pauses if Apify/Shopify fetch fails</li>
+                    <li>• Prevents large unexpected changes (>30%)</li>
+                    <li>• Stops if error rate exceeds 20%</li>
+                    <li>• Limits bulk discontinuations (max 100)</li>
+                </ul>
             </div>
         </div>
 
@@ -1049,6 +1219,8 @@ app.get('/', (req, res) => {
     </div>
 
     <script>
+        let systemPaused = ${systemPaused};
+        
         function toggleDarkMode() {
             document.documentElement.classList.toggle('dark');
             localStorage.setItem('darkMode', document.documentElement.classList.contains('dark'));
@@ -1056,6 +1228,73 @@ app.get('/', (req, res) => {
         
         if (localStorage.getItem('darkMode') === 'true') {
             document.documentElement.classList.add('dark');
+        }
+        
+        async function togglePause() {
+            const button = document.getElementById('pauseButton');
+            const spinner = document.getElementById('pauseSpinner');
+            
+            button.disabled = true;
+            spinner.style.display = 'inline-block';
+            
+            try {
+                const response = await fetch('/api/pause', { method: 'POST' });
+                const result = await response.json();
+                
+                if (result.success) {
+                    systemPaused = result.paused;
+                    updateSystemStatus();
+                    addLogEntry('🔄 System ' + (result.paused ? 'paused' : 'resumed'), 'info');
+                } else {
+                    addLogEntry('❌ Failed to toggle pause', 'error');
+                }
+            } catch (error) {
+                console.error('Pause toggle error:', error);
+                addLogEntry('❌ Failed to toggle pause', 'error');
+            } finally {
+                button.disabled = false;
+                spinner.style.display = 'none';
+            }
+        }
+        
+        function updateSystemStatus() {
+            const statusEl = document.getElementById('systemStatus');
+            const statusDescEl = document.getElementById('systemStatusDesc');
+            const buttonEl = document.getElementById('pauseButton');
+            const containerEl = buttonEl.closest('.rounded-lg');
+            
+            if (systemPaused) {
+                statusEl.textContent = 'System Status: PAUSED';
+                statusEl.className = 'font-medium text-red-800 dark:text-red-300';
+                statusDescEl.textContent = 'Automatic syncing is disabled';
+                statusDescEl.className = 'text-sm text-red-600 dark:text-red-400';
+                buttonEl.textContent = 'Resume System';
+                buttonEl.className = 'bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg btn-hover';
+                containerEl.className = 'mb-6 p-4 rounded-lg bg-red-100 dark:bg-red-900 border-red-300 dark:border-red-700 border';
+            } else {
+                statusEl.textContent = 'System Status: ACTIVE';
+                statusEl.className = 'font-medium text-green-800 dark:text-green-300';
+                statusDescEl.textContent = 'Automatic syncing every 30min (inventory) & 6hrs (products)';
+                statusDescEl.className = 'text-sm text-green-600 dark:text-green-400';
+                buttonEl.textContent = 'Pause System';
+                buttonEl.className = 'bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg btn-hover';
+                containerEl.className = 'mb-6 p-4 rounded-lg bg-green-100 dark:bg-green-900 border-green-300 dark:border-green-700 border';
+            }
+        }
+        
+        async function clearFailsafe() {
+            try {
+                const response = await fetch('/api/failsafe/clear', { method: 'POST' });
+                const result = await response.json();
+                
+                if (result.success) {
+                    addLogEntry('✅ Failsafe cleared', 'success');
+                    setTimeout(() => location.reload(), 1000);
+                }
+            } catch (error) {
+                console.error('Clear failsafe error:', error);
+                addLogEntry('❌ Failed to clear failsafe', 'error');
+            }
         }
         
         async function triggerSync(type) {
@@ -1080,35 +1319,6 @@ app.get('/', (req, res) => {
             } catch (error) {
                 console.error('Sync error:', error);
                 addLogEntry('❌ Failed to trigger ' + type + ' sync', 'error');
-            } finally {
-                button.disabled = false;
-                spinner.style.display = 'none';
-                overlay.classList.remove('active');
-            }
-        }
-        
-        async function togglePause() {
-            const button = event.target;
-            const spinner = document.getElementById('pauseSpinner');
-            const overlay = document.getElementById('loadingOverlay');
-            
-            button.disabled = true;
-            spinner.style.display = 'inline-block';
-            overlay.classList.add('active');
-            
-            try {
-                const response = await fetch('/api/pause', { method: 'POST' });
-                const result = await response.json();
-                
-                if (result.success) {
-                    addLogEntry('🔄 System ' + (result.paused ? 'paused' : 'resumed'), 'info');
-                    setTimeout(() => location.reload(), 1000);
-                } else {
-                    addLogEntry('❌ Failed to toggle pause', 'error');
-                }
-            } catch (error) {
-                console.error('Pause toggle error:', error);
-                addLogEntry('❌ Failed to toggle pause', 'error');
             } finally {
                 button.disabled = false;
                 spinner.style.display = 'none';
@@ -1146,6 +1356,26 @@ app.get('/', (req, res) => {
             }
             rows.forEach(row => table.appendChild(row));
         }
+        
+        // Auto-refresh stats every 30 seconds
+        setInterval(async () => {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                
+                document.getElementById('newProducts').textContent = data.newProducts;
+                document.getElementById('inventoryUpdates').textContent = data.inventoryUpdates;
+                document.getElementById('discontinued').textContent = data.discontinued;
+                document.getElementById('errors').textContent = data.errors;
+                
+                if (data.systemPaused !== systemPaused) {
+                    systemPaused = data.systemPaused;
+                    updateSystemStatus();
+                }
+            } catch (error) {
+                console.error('Status update error:', error);
+            }
+        }, 30000);
     </script>
 </body>
 </html>
@@ -1156,15 +1386,25 @@ app.get('/api/status', (req, res) => {
   res.json({
     ...stats,
     systemPaused,
+    failsafeTriggered,
+    failsafeReason,
     logs: logs.slice(0, 20),
     mismatches: mismatches.slice(0, 20),
     uptime: process.uptime(),
+    lastKnownGoodState,
     environment: {
       apifyToken: config.apify.token ? 'SET' : 'MISSING',
       shopifyToken: config.shopify.accessToken ? 'SET' : 'MISSING',
       shopifyDomain: config.shopify.domain || 'MISSING'
     }
   });
+});
+
+app.post('/api/failsafe/clear', (req, res) => {
+  failsafeTriggered = false;
+  failsafeReason = '';
+  addLog('Failsafe cleared manually', 'info');
+  res.json({ success: true });
 });
 
 app.get('/api/mismatches', (req, res) => {
@@ -1184,43 +1424,6 @@ app.get('/api/locations', async (req, res) => {
         active: loc.active
       }))
     });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/diagnose', async (req, res) => {
-  try {
-    addLog('Running diagnostic check...', 'info');
-    
-    const [apifyData, shopifyData] = await Promise.all([
-      getApifyProducts(),
-      getShopifyProducts()
-    ]);
-    
-    // Sample some products for analysis
-    const apifySample = apifyData.slice(0, 10);
-    const shopifySample = shopifyData.slice(0, 10);
-    
-    const diagnosis = {
-      apifyTotal: apifyData.length,
-      shopifyTotal: shopifyData.length,
-      shopifyWithApifyTag: shopifyData.filter(p => p.tags && p.tags.includes('Supplier:Apify')).length,
-      apifySample: apifySample.map(item => ({
-        title: item.title,
-        url: item.url || item.canonicalUrl || 'none',
-        sku: item.sku || 'none',
-        generatedHandle: extractHandleFromCanonicalUrl(item, 0)
-      })),
-      shopifySample: shopifySample.map(item => ({
-        title: item.title,
-        handle: item.handle,
-        sku: item.variants?.[0]?.sku || 'none',
-        tags: item.tags
-      }))
-    };
-    
-    res.json(diagnosis);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1253,7 +1456,20 @@ app.post('/api/sync/inventory', async (req, res) => {
   try {
     addLog('Manual inventory sync triggered', 'info');
     const result = await updateInventory();
-    res.json({ success: true, message: `Updated ${result.updated} products`, data: result });
+    
+    if (mismatches.length > 100) {
+      addLog(`Note: ${mismatches.length} Apify products don't exist in Shopify. Consider running "Create New Products" to add them.`, 'warning');
+    }
+    
+    res.json({ 
+      success: true, 
+      message: `Updated ${result.updated} products`, 
+      data: {
+        ...result,
+        mismatches: mismatches.length,
+        suggestion: mismatches.length > 100 ? 'Consider running "Create New Products" to add missing products' : null
+      }
+    });
   } catch (error) {
     addLog(`Inventory sync failed: ${error.message}`, 'error');
     stats.errors++;
@@ -1273,10 +1489,53 @@ app.post('/api/sync/discontinued', async (req, res) => {
   }
 });
 
-// Scheduled jobs
+app.post('/api/sync/mismatches', async (req, res) => {
+  try {
+    addLog('Creating products from mismatches...', 'info');
+    
+    const [apifyData, shopifyData] = await Promise.all([
+      getApifyProducts(),
+      getShopifyProducts()
+    ]);
+    
+    const processedProducts = processApifyProducts(apifyData, { processPrice: true });
+    const shopifyHandles = new Set(shopifyData.map(p => p.handle.toLowerCase()));
+    
+    const newProducts = processedProducts.filter(p => !shopifyHandles.has(p.handle.toLowerCase()));
+    
+    addLog(`Found ${newProducts.length} products to create from mismatches`, 'info');
+    
+    const productsToCreate = newProducts.slice(0, 50);
+    
+    if (productsToCreate.length === 0) {
+      return res.json({ 
+        success: true, 
+        message: 'No new products to create', 
+        data: { created: 0, errors: 0, total: 0 }
+      });
+    }
+    
+    const result = await createNewProducts(productsToCreate);
+    
+    res.json({ 
+      success: true, 
+      message: `Created ${result.created} products from mismatches`, 
+      data: {
+        ...result,
+        remaining: newProducts.length - productsToCreate.length
+      }
+    });
+  } catch (error) {
+    addLog(`Mismatch sync failed: ${error.message}`, 'error');
+    stats.errors++;
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Scheduled jobs with failsafe
 cron.schedule('*/30 * * * *', async () => {
-  if (systemPaused) {
-    addLog('Scheduled inventory update skipped - system paused', 'warning');
+  if (systemPaused || failsafeTriggered) {
+    addLog(`Scheduled inventory update skipped - system ${systemPaused ? 'paused' : 'failsafe triggered'}`, 'warning');
     return;
   }
   addLog('Starting scheduled inventory update', 'info');
@@ -1287,8 +1546,8 @@ cron.schedule('*/30 * * * *', async () => {
 });
 
 cron.schedule('0 */6 * * *', async () => {
-  if (systemPaused) {
-    addLog('Scheduled product creation skipped - system paused', 'warning');
+  if (systemPaused || failsafeTriggered) {
+    addLog(`Scheduled product creation skipped - system ${systemPaused ? 'paused' : 'failsafe triggered'}`, 'warning');
     return;
   }
   addLog('Starting scheduled product creation', 'info');
@@ -1316,4 +1575,5 @@ app.listen(PORT, () => {
   addLog(`Shopify Sync Service started on port ${PORT}`, 'success');
   addLog('Inventory updates: Every 30 minutes', 'info');
   addLog('Product creation: Every 6 hours', 'info');
+  addLog('Failsafe protection: ACTIVE', 'info');
 });
