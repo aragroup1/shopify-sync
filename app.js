@@ -11,12 +11,12 @@ app.use(express.json());
 let stats = { newProducts: 0, inventoryUpdates: 0, discontinued: 0, errors: 0, lastSync: null };
 let logs = [];
 let systemPaused = false;
-let mismatches = []; // Store unmatched products for reporting
+let mismatches = [];
 
 function addLog(message, type = 'info') {
   const log = { timestamp: new Date().toISOString(), message, type };
   logs.unshift(log);
-  if (logs.length > 100) logs = logs.slice(0, 100); // Increased log limit
+  if (logs.length > 100) logs = logs.slice(0, 100);
   console.log(`[${log.timestamp}] ${message}`);
 }
 
@@ -131,10 +131,10 @@ function normalizeHandle(input, index, isTitle = false) {
   if (!isTitle && handle && handle !== 'undefined') {
     handle = handle.replace(config.apify.urlPrefix, '')
       .replace(/\.html$/, '')
-      .replace(/\s*\(.*?\)\s*/g, '') // Remove parentheses content
-      .replace(/[^a-z0-9-]+/g, '-') // Replace non-alphanumeric with dash
-      .replace(/-+/g, '-') // Collapse multiple dashes
-      .replace(/^-|-$/g, '') // Trim leading/trailing dashes
+      .replace(/\s*\(.*?\)\s*/g, '')
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
       .toLowerCase();
     
     if (handle !== input && handle.length > 0) {
@@ -143,14 +143,13 @@ function normalizeHandle(input, index, isTitle = false) {
     }
   }
   
-  // Fallback to title-based handle
   handle = (isTitle ? input : `product-${index}`).toLowerCase()
-    .replace(/\b\d{4}\b/g, '') // Remove 4-digit years
-    .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '') // Remove suffixes
-    .replace(/\s*\(.*?\)\s*/g, '') // Remove parentheses content
-    .replace(/[^a-z0-9-]+/g, '-') // Replace non-alphanumeric with dash
-    .replace(/-+/g, '-') // Collapse multiple dashes
-    .replace(/^-|-$/g, ''); // Trim leading/trailing dashes
+    .replace(/\b\d{4}\b/g, '')
+    .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
+    .replace(/\s*\(.*?\)\s*/g, '')
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
   
   if (index < 5) addLog(`Fallback handle: "${input}" → "${handle}"`, 'info');
   
@@ -419,7 +418,7 @@ async function updateInventory() {
   }
 
   let updated = 0, created = 0, errors = 0;
-  mismatches = []; // Reset mismatches
+  mismatches = [];
   try {
     addLog('=== STARTING INVENTORY UPDATE WORKFLOW ===', 'info');
     const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]);
@@ -546,56 +545,104 @@ app.get('/', (req, res) => {
     <style>
         body {
             transition: background-color 0.3s, color 0.3s;
-            background: linear-gradient(to bottom right, #f3f4f6, #e5e7eb);
+            background: linear-gradient(to bottom right, #ff6e7f, #bfe9ff);
+            animation: gradientShift 15s ease infinite;
         }
         .dark body {
-            background-color: #1f2937;
-            background: linear-gradient(to bottom right, #111827, #1f2937);
+            background: linear-gradient(to bottom right, #1a1a2e, #16213e);
+            animation: gradientShiftDark 15s ease infinite;
+        }
+        @keyframes gradientShift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+        @keyframes gradientShiftDark {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
         }
         .gradient-bg {
-            background: linear-gradient(135deg, #ff9a9e 0%, #fad0c4 99%, #fad0c4 100%);
-            box-shadow: 0 10px 20px rgba(255, 154, 158, 0.3);
+            background: linear-gradient(135deg, #ff6e7f 0%, #bfe9ff 100%);
+            box-shadow: 0 10px 20px rgba(255, 110, 127, 0.4);
+            position: relative;
+            overflow: hidden;
+        }
+        .gradient-bg::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(45deg, rgba(255,255,255,0.1), rgba(255,255,255,0.3));
+            opacity: 0;
+            transition: opacity 0.5s;
+        }
+        .gradient-bg:hover::before {
+            opacity: 1;
         }
         .card-hover {
             transition: all 0.3s ease-in-out;
-            box-shadow: 8px 8px 16px #d1d9e6, -8px -8px 16px #f9f9f9;
-            background: rgba(255, 255, 255, 0.8);
-            backdrop-filter: blur(10px);
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
         }
         .dark .card-hover {
-            box-shadow: 8px 8px 16px #141a25, -8px -8px 16px #2a3648;
-            background: rgba(31, 41, 55, 0.8);
-            backdrop-filter: blur(10px);
+            background: rgba(31, 41, 55, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
         }
         .card-hover:hover {
-            transform: translateY(-6px) scale(1.02);
-            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.2);
+            transform: translateY(-8px) scale(1.03);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+            border-color: rgba(255, 110, 127, 0.5);
         }
         .btn-hover {
             transition: all 0.3s ease-in-out;
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            position: relative;
+            overflow: hidden;
+            z-index: 1;
+        }
+        .btn-hover::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 0;
+            height: 0;
+            background: rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            transition: width 0.6s ease, height 0.6s ease;
+            z-index: -1;
+        }
+        .btn-hover:hover::before {
+            width: 300px;
+            height: 300px;
         }
         .btn-hover:hover {
-            transform: scale(1.08);
-            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
-            animation: pulse 1s infinite;
+            transform: scale(1.1);
+            box-shadow: 0 0 20px rgba(255, 110, 127, 0.7);
+            animation: glow 1.5s infinite;
         }
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
-            70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+        @keyframes glow {
+            0% { box-shadow: 0 0 5px rgba(255, 110, 127, 0.7); }
+            50% { box-shadow: 0 0 20px rgba(255, 110, 127, 1); }
+            100% { box-shadow: 0 0 5px rgba(255, 110, 127, 0.7); }
         }
         .fade-in {
-            animation: fadeIn 0.5s ease-in-out;
+            animation: fadeIn 0.6s ease-in-out;
         }
         @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(20px); }
+            from { opacity: 0; transform: translateY(30px); }
             to { opacity: 1; transform: translateY(0); }
         }
         .spinner {
             display: none;
             border: 4px solid rgba(255, 255, 255, 0.3);
-            border-top: 4px solid #ffffff;
+            border-top: 4px solid #ff6e7f;
             border-radius: 50%;
             width: 24px;
             height: 24px;
@@ -613,7 +660,7 @@ app.get('/', (req, res) => {
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(0, 0, 0, 0.7);
+            background: rgba(0, 0, 0, 0.8);
             z-index: 1000;
             display: flex;
             align-items: center;
@@ -623,29 +670,56 @@ app.get('/', (req, res) => {
             display: flex;
         }
         .loading-spinner {
-            border: 8px solid rgba(255, 255, 255, 0.3);
-            border-top: 8px solid #ff9a9e;
-            border-radius: 50%;
             width: 60px;
             height: 60px;
-            animation: spin 1s linear infinite;
+            border: 8px solid rgba(255, 255, 255, 0.2);
+            border-top: 8px solid #ff6e7f;
+            border-radius: 50%;
+            animation: spin 1s linear infinite, pulseSpinner 2s infinite;
+            transform-style: preserve-3d;
+        }
+        @keyframes pulseSpinner {
+            0% { transform: scale(1) rotateX(0deg); }
+            50% { transform: scale(1.2) rotateX(10deg); }
+            100% { transform: scale(1) rotateX(0deg); }
         }
         .mismatch-table th {
             cursor: pointer;
-            transition: background-color 0.3s;
+            transition: all 0.3s ease;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(8px);
         }
         .mismatch-table th:hover {
-            background-color: #f3f4f6;
+            background: rgba(255, 110, 127, 0.3);
+            transform: scale(1.02);
         }
         .dark .mismatch-table th:hover {
-            background-color: #374151;
+            background: rgba(255, 110, 127, 0.2);
+        }
+        .mismatch-table tr {
+            transition: background-color 0.3s;
+        }
+        .mismatch-table tr:nth-child(even) {
+            background: rgba(255, 255, 255, 0.05);
+        }
+        .dark .mismatch-table tr:nth-child(even) {
+            background: rgba(31, 41, 55, 0.1);
+        }
+        .mismatch-table tr:hover {
+            background: rgba(255, 110, 127, 0.2);
+            transform: scale(1.01);
         }
         .log-container {
-            box-shadow: 0 0 20px rgba(0, 0, 0, 0.2);
+            background: rgba(17, 24, 39, 0.9);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.3);
             transition: box-shadow 0.3s;
         }
         .log-container:hover {
-            box-shadow: 0 0 30px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 0 40px rgba(255, 110, 127, 0.5);
+        }
+        .dark .log-container {
+            background: rgba(17, 24, 39, 0.95);
         }
     </style>
 </head>
@@ -718,7 +792,7 @@ app.get('/', (req, res) => {
             </div>
             <div class="mt-4 p-4 rounded-lg bg-gray-100 dark:bg-gray-700">
                 <p class="text-sm text-gray-600 dark:text-gray-400"><strong>Manual controls work even when system is paused</strong></p>
-                <p class="text-sm text-blue-600 dark:text-blue-400 mt-1"><strong>Updated:</strong> Enhanced handle matching and mismatch reporting</p>
+                <p class="text-sm text-blue-600 dark:text-blue-400 mt-1"><strong>Updated:</strong> Enhanced handle matching and sexy UI design</p>
             </div>
         </div>
 
@@ -752,13 +826,12 @@ app.get('/', (req, res) => {
             <h2 class="text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-4">Activity Log</h2>
             <div class="bg-gray-900 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm" id="logContainer">
                 ${logs.map(log => 
-                    '<div class="' +
-                    (log.type === 'success' ? 'text-green-400' :
-                     log.type === 'error' ? 'text-red-400' :
-                     log.type === 'warning' ? 'text-yellow-400' :
-                     'text-gray-300') +
-                    '">[' + new Date(log.timestamp).toLocaleTimeString() + '] ' +
-                    log.message + '</div>'
+                    `<div class="${
+                        log.type === 'success' ? 'text-green-400' :
+                        log.type === 'error' ? 'text-red-400' :
+                        log.type === 'warning' ? 'text-yellow-400' :
+                        'text-gray-300'
+                    }">[${new Date(log.timestamp).toLocaleTimeString()}] ${log.message}</div>`
                 ).join('')}
             </div>
         </div>
