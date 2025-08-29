@@ -661,7 +661,6 @@ app.get('/', (req, res) => {
             bottom: 0;
             background: rgba(0, 0, 0, 0.8);
             z-index: 1000;
-            display: flex;
             align-items: center;
             justify-content: center;
         }
@@ -810,10 +809,10 @@ app.get('/', (req, res) => {
                     <tbody>
                         ${mismatches.map(mismatch => `
                             <tr class="border-b dark:border-gray-700">
-                                <td class="px-4 py-2">${mismatch.apifyTitle}</td>
-                                <td class="px-4 py-2">${mismatch.apifyHandle}</td>
-                                <td class="px-4 py-2">${mismatch.apifyUrl}</td>
-                                <td class="px-4 py-2">${mismatch.shopifyHandle}</td>
+                                <td class="px-4 py-2">${mismatch.apifyTitle || ''}</td>
+                                <td class="px-4 py-2">${mismatch.apifyHandle || ''}</td>
+                                <td class="px-4 py-2">${mismatch.apifyUrl || ''}</td>
+                                <td class="px-4 py-2">${mismatch.shopifyHandle || ''}</td>
                             </tr>
                         `).join('')}
                     </tbody>
@@ -841,26 +840,33 @@ app.get('/', (req, res) => {
             document.documentElement.classList.toggle('dark');
             localStorage.setItem('darkMode', document.documentElement.classList.contains('dark'));
         }
+        
+        // Check dark mode preference on load
         if (localStorage.getItem('darkMode') === 'true') {
             document.documentElement.classList.add('dark');
         }
+        
         async function triggerSync(type) {
-            const button = document.querySelector('button[onclick="triggerSync(\\'' + type + '\\')"]');
+            const button = event.target;
             const spinner = document.getElementById(type + 'Spinner');
             const overlay = document.getElementById('loadingOverlay');
+            
             button.disabled = true;
             spinner.style.display = 'inline-block';
             overlay.classList.add('active');
+            
             try {
                 const response = await fetch('/api/sync/' + type, { method: 'POST' });
                 const result = await response.json();
+                
                 if (result.success) {
                     addLogEntry('✅ ' + result.message, 'success');
                     setTimeout(() => location.reload(), 2000);
                 } else {
                     addLogEntry('❌ ' + (result.message || 'Sync failed'), 'error');
                 }
-            } catch {
+            } catch (error) {
+                console.error('Sync error:', error);
                 addLogEntry('❌ Failed to trigger ' + type + ' sync', 'error');
             } finally {
                 button.disabled = false;
@@ -868,23 +874,28 @@ app.get('/', (req, res) => {
                 overlay.classList.remove('active');
             }
         }
+        
         async function togglePause() {
-            const button = document.querySelector('button[onclick="togglePause()"]');
+            const button = event.target;
             const spinner = document.getElementById('pauseSpinner');
             const overlay = document.getElementById('loadingOverlay');
+            
             button.disabled = true;
             spinner.style.display = 'inline-block';
             overlay.classList.add('active');
+            
             try {
                 const response = await fetch('/api/pause', { method: 'POST' });
                 const result = await response.json();
+                
                 if (result.success) {
                     addLogEntry('🔄 System ' + (result.paused ? 'paused' : 'resumed'), 'info');
                     setTimeout(() => location.reload(), 1000);
                 } else {
                     addLogEntry('❌ Failed to toggle pause', 'error');
                 }
-            } catch {
+            } catch (error) {
+                console.error('Pause toggle error:', error);
                 addLogEntry('❌ Failed to toggle pause', 'error');
             } finally {
                 button.disabled = false;
@@ -892,13 +903,20 @@ app.get('/', (req, res) => {
                 overlay.classList.remove('active');
             }
         }
+        
         function addLogEntry(message, type) {
             const logContainer = document.getElementById('logContainer');
             const time = new Date().toLocaleTimeString();
-            const color = type === 'success' ? 'text-green-400' : type === 'error' ? 'text-red-400' : type === 'warning' ? 'text-yellow-400' : 'text-gray-300';
-            const newLog = '<div class="' + color + '">[' + time + '] ' + message + '</div>';
-            logContainer.innerHTML = newLog + logContainer.innerHTML;
+            const color = type === 'success' ? 'text-green-400' : 
+                         type === 'error' ? 'text-red-400' : 
+                         type === 'warning' ? 'text-yellow-400' : 
+                         'text-gray-300';
+            const newLog = document.createElement('div');
+            newLog.className = color;
+            newLog.textContent = '[' + time + '] ' + message;
+            logContainer.insertBefore(newLog, logContainer.firstChild);
         }
+        
         function sortTable(n) {
             const table = document.querySelector('.mismatch-table tbody');
             const rows = Array.from(table.getElementsByTagName('tr'));
