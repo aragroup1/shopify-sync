@@ -49,36 +49,66 @@ const shopifyClient = axios.create({
 async function getApifyProducts() {
   let allItems = [];
   let offset = 0;
+  let pageCount = 0;
   const limit = 500;
+  
+  addLog('Starting Apify product fetch...', 'info');
+  
   while (true) {
     const response = await apifyClient.get(
       `/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=${limit}&offset=${offset}`
     );
     const items = response.data;
     allItems.push(...items);
+    pageCount++;
+    
+    addLog(`Apify page ${pageCount}: fetched ${items.length} products (total: ${allItems.length})`, 'info');
+    
     if (items.length < limit) break;
     offset += limit;
-    await new Promise(resolve => setTimeout(resolve, 1000)); // Delay to avoid rate limits
+    await new Promise(resolve => setTimeout(resolve, 1000));
   }
+  
+  addLog(`Apify fetch complete: ${allItems.length} total products`, 'info');
+  
+  // Log sample products for debugging
+  addLog(`Sample Apify products: ${allItems.slice(0, 3).map(p => `${p.title} (${p.sku || 'no-sku'})`).join(', ')}`, 'info');
+  
   return allItems;
 }
 
 async function getShopifyProducts() {
   let allProducts = [];
   let sinceId = null;
+  let pageCount = 0;
   const limit = 250;
   const fields = 'id,handle,title,variants,tags';
+  
+  addLog('Starting Shopify product fetch...', 'info');
+  
   while (true) {
     let url = `/products.json?limit=${limit}&fields=${fields}`;
     if (sinceId) url += `&since_id=${sinceId}`;
+    
     const response = await shopifyClient.get(url);
     const products = response.data.products;
     allProducts.push(...products);
+    pageCount++;
+    
+    addLog(`Shopify page ${pageCount}: fetched ${products.length} products (total: ${allProducts.length})`, 'info');
+    
     if (products.length < limit) break;
     sinceId = products[products.length - 1].id;
-    await new Promise(resolve => setTimeout(resolve, 1000)); // Delay to avoid rate limits
+    await new Promise(resolve => setTimeout(resolve, 1000));
   }
-  return allProducts.filter(p => p.tags && p.tags.includes('Supplier:Apify'));
+  
+  const apifyTaggedProducts = allProducts.filter(p => p.tags && p.tags.includes('Supplier:Apify'));
+  addLog(`Shopify fetch complete: ${allProducts.length} total products, ${apifyTaggedProducts.length} with Supplier:Apify tag`, 'info');
+  
+  // Log sample products for debugging
+  addLog(`Sample Shopify products: ${apifyTaggedProducts.slice(0, 3).map(p => `${p.handle} (inv: ${p.variants?.[0]?.inventory_quantity || 'N/A'})`).join(', ')}`, 'info');
+  
+  return apifyTaggedProducts;
 }
 
 // Generate SEO-friendly description
@@ -338,38 +368,66 @@ async function updateInventory() {
 
   let updated = 0, errors = 0;
   try {
-    addLog('Fetching data for inventory updates...', 'info');
+    addLog('=== STARTING INVENTORY UPDATE WORKFLOW ===', 'info');
     const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]);
-    addLog(`[Debug] Shopify products count: ${shopifyData.length}`, 'info');
-    if (shopifyData.length === 0) {
-      addLog('[Error] Shopify product fetch returned 0 products. Inventory update may be incomplete!', 'error');
-    } else {
-      console.log('[Debug] First 10 Shopify products:', shopifyData.slice(0, 10).map(p => p.handle));
-    }
-    addLog(`[Debug] Apify products count: ${apifyData.length}`, 'info');
+    
+    addLog(`Data comparison: ${apifyData.length} Apify products vs ${shopifyData.length} Shopify products`, 'info');
+    
     const processedProducts = processApifyProducts(apifyData);
-    addLog(`[Debug] Processed Apify products: ${processedProducts.length}`, 'info');
+    addLog(`Processed ${processedProducts.length} valid Apify products after filtering`, 'info');
+    
     const shopifyMap = new Map(shopifyData.map(p => [p.handle, p]));
+    addLog(`Created Shopify lookup map with ${shopifyMap.size} products`, 'info');
+    
+    // Detailed matching analysis
+    let matchedCount = 0;
+    let skippedNoVariants = 0;
+    let skippedSameInventory = 0;
     
     const inventoryUpdates = [];
-    processedProducts.forEach(apifyProduct => {
+    processedProducts.forEach((apifyProduct, index) => {
       const shopifyProduct = shopifyMap.get(apifyProduct.handle);
-      if (shopifyProduct && shopifyProduct.variants && shopifyProduct.variants[0]) {
-        const currentInventory = shopifyProduct.variants[0].inventory_quantity || 0;
-        if (currentInventory !== apifyProduct.inventory) {
-          inventoryUpdates.push({
-            handle: apifyProduct.handle, title: shopifyProduct.title,
-            currentInventory, newInventory: apifyProduct.inventory,
-            inventoryItemId: shopifyProduct.variants[0].inventory_item_id
-          });
-        }
+      
+      if (!shopifyProduct) {
+        if (index < 5) addLog(`No Shopify match for: ${apifyProduct.handle}`, 'info');
+        return;
+      }
+      
+      matchedCount++;
+      
+      if (!shopifyProduct.variants || !shopifyProduct.variants[0]) {
+        skippedNoVariants++;
+        if (index < 5) addLog(`No variants for: ${shopifyProduct.handle}`, 'warning');
+        return;
+      }
+      
+      const currentInventory = shopifyProduct.variants[0].inventory_quantity || 0;
+      const targetInventory = apifyProduct.inventory;
+      
+      if (currentInventory === targetInventory) {
+        skippedSameInventory++;
+        return;
+      }
+      
+      inventoryUpdates.push({
+        handle: apifyProduct.handle,
+        title: shopifyProduct.title,
+        currentInventory,
+        newInventory: targetInventory,
+        inventoryItemId: shopifyProduct.variants[0].inventory_item_id
+      });
+      
+      // Log first few updates for debugging
+      if (inventoryUpdates.length <= 5) {
+        addLog(`Update needed: ${apifyProduct.handle} (${currentInventory} → ${targetInventory})`, 'info');
       }
     });
 
-    addLog(`Found ${inventoryUpdates.length} inventory updates needed`, 'info');
-    if (inventoryUpdates.length > 0) {
-      console.log('[Debug] Sample updates:', inventoryUpdates.slice(0, 5));
-    }
+    addLog(`=== MATCHING ANALYSIS ===`, 'info');
+    addLog(`Matched products: ${matchedCount}`, 'info');
+    addLog(`Skipped (no variants): ${skippedNoVariants}`, 'info');
+    addLog(`Skipped (same inventory): ${skippedSameInventory}`, 'info');
+    addLog(`Updates needed: ${inventoryUpdates.length}`, 'info');
 
     for (const update of inventoryUpdates) {
       try {
@@ -378,19 +436,20 @@ async function updateInventory() {
           inventory_item_id: update.inventoryItemId,
           available: update.newInventory
         });
-        addLog(`Updated: ${update.title} (${update.currentInventory} → ${update.newInventory})`, 'success');
+        addLog(`✓ Updated: ${update.title} (${update.currentInventory} → ${update.newInventory})`, 'success');
         updated++;
         await new Promise(resolve => setTimeout(resolve, 500));
       } catch (error) {
         errors++;
-        addLog(`Failed to update ${update.title}: ${error.message}`, 'error');
+        addLog(`✗ Failed: ${update.title} - ${error.message}`, 'error');
       }
     }
 
     stats.inventoryUpdates += updated;
     stats.errors += errors;
     stats.lastSync = new Date().toISOString();
-    addLog(`Inventory update completed: ${updated} updated, ${errors} errors`, updated > 0 ? 'success' : 'info');
+    addLog(`=== INVENTORY UPDATE COMPLETE ===`, 'info');
+    addLog(`Result: ${updated} updated, ${errors} errors out of ${inventoryUpdates.length} needed`, updated > 0 ? 'success' : 'info');
     return { updated, errors, total: inventoryUpdates.length };
   } catch (error) {
     addLog(`Inventory update workflow failed: ${error.message}`, 'error');
