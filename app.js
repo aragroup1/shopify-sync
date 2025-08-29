@@ -809,14 +809,14 @@ app.get('/', (req, res) => {
                         </tr>
                     </thead>
                     <tbody>
-                       ${mismatches.map(mismatch => `
-    <tr class="border-b dark:border-gray-700">
-        <td class="px-4 py-2">${mismatch.apifyTitle}</td>
-        <td class="px-4 py-2">${mismatch.apifyHandle}</td>
-        <td class="px-4 py-2">${mismatch.apifyUrl}</td>
-        <td class="px-4 py-2">${mismatch.shopifyHandle}</td>
-    </tr>
-`).join('')}
+                        ${mismatches.map(mismatch => `
+                            <tr class="border-b dark:border-gray-700">
+                                <td class="px-4 py-2">${mismatch.apifyTitle}</td>
+                                <td class="px-4 py-2">${mismatch.apifyHandle}</td>
+                                <td class="px-4 py-2">${mismatch.apifyUrl}</td>
+                                <td class="px-4 py-2">${mismatch.shopifyHandle}</td>
+                            </tr>
+                        `).join('')}
                     </tbody>
                 </table>
             </div>
@@ -846,23 +846,23 @@ app.get('/', (req, res) => {
             document.documentElement.classList.add('dark');
         }
         async function triggerSync(type) {
-            const button = document.querySelector(`button[onclick="triggerSync('${type}')"]`);
-            const spinner = document.getElementById(`${type}Spinner`);
+            const button = document.querySelector('button[onclick="triggerSync(\\'' + type + '\\')"]');
+            const spinner = document.getElementById(type + 'Spinner');
             const overlay = document.getElementById('loadingOverlay');
             button.disabled = true;
             spinner.style.display = 'inline-block';
             overlay.classList.add('active');
             try {
-                const response = await fetch(`/api/sync/${type}`, { method: 'POST' });
+                const response = await fetch('/api/sync/' + type, { method: 'POST' });
                 const result = await response.json();
                 if (result.success) {
-                    addLogEntry(`✅ ${result.message}`, 'success');
+                    addLogEntry('✅ ' + result.message, 'success');
                     setTimeout(() => location.reload(), 2000);
                 } else {
-                    addLogEntry(`❌ ${result.message || 'Sync failed'}`, 'error');
+                    addLogEntry('❌ ' + (result.message || 'Sync failed'), 'error');
                 }
             } catch {
-                addLogEntry(`❌ Failed to trigger ${type} sync`, 'error');
+                addLogEntry('❌ Failed to trigger ' + type + ' sync', 'error');
             } finally {
                 button.disabled = false;
                 spinner.style.display = 'none';
@@ -870,7 +870,7 @@ app.get('/', (req, res) => {
             }
         }
         async function togglePause() {
-            const button = document.querySelector(`button[onclick="togglePause()"]`);
+            const button = document.querySelector('button[onclick="togglePause()"]');
             const spinner = document.getElementById('pauseSpinner');
             const overlay = document.getElementById('loadingOverlay');
             button.disabled = true;
@@ -880,7 +880,7 @@ app.get('/', (req, res) => {
                 const response = await fetch('/api/pause', { method: 'POST' });
                 const result = await response.json();
                 if (result.success) {
-                    addLogEntry(`🔄 System ${result.paused ? 'paused' : 'resumed'}`, 'info');
+                    addLogEntry('🔄 System ' + (result.paused ? 'paused' : 'resumed'), 'info');
                     setTimeout(() => location.reload(), 1000);
                 } else {
                     addLogEntry('❌ Failed to toggle pause', 'error');
@@ -897,7 +897,7 @@ app.get('/', (req, res) => {
             const logContainer = document.getElementById('logContainer');
             const time = new Date().toLocaleTimeString();
             const color = type === 'success' ? 'text-green-400' : type === 'error' ? 'text-red-400' : type === 'warning' ? 'text-yellow-400' : 'text-gray-300';
-            const newLog = `<div class="${color}">[${time}] ${message}</div>`;
+            const newLog = '<div class="' + color + '">[' + time + '] ' + message + '</div>';
             logContainer.innerHTML = newLog + logContainer.innerHTML;
         }
         function sortTable(n) {
