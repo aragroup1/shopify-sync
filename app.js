@@ -49,31 +49,37 @@ const shopifyClient = axios.create({
 async function getApifyProducts() {
   let allItems = [];
   let offset = 0;
-  let pageCount = 0;
   const limit = 500;
-  
+
   addLog('Starting Apify product fetch...', 'info');
-  
+
   while (true) {
     const response = await apifyClient.get(
       `/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=${limit}&offset=${offset}`
     );
     const items = response.data;
+
+    // Log all columns for first 3 products to debug
+    if (offset === 0) {
+      items.slice(0, 3).forEach((item, index) => {
+        addLog(`DEBUG APIFY PRODUCT ${index} keys: ${Object.keys(item).join(', ')}`, 'info');
+        addLog(`DEBUG APIFY PRODUCT ${index} sample data: ${JSON.stringify(item).substring(0, 500)}...`, 'info');
+      });
+    }
+
     allItems.push(...items);
-    pageCount++;
-    
-    addLog(`Apify page ${pageCount}: fetched ${items.length} products (total: ${allItems.length})`, 'info');
-    
+
+    addLog(`Apify page fetched ${items.length} products (total: ${allItems.length})`, 'info');
+
     if (items.length < limit) break;
     offset += limit;
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
-  
+
   addLog(`Apify fetch complete: ${allItems.length} total products`, 'info');
-  addLog(`Sample Apify products: ${allItems.slice(0, 3).map(p => `${p.title} (${p.sku || 'no-sku'})`).join(', ')}`, 'info');
-  
   return allItems;
 }
+
 
 async function getShopifyProducts() {
   let allProducts = [];
