@@ -846,7 +846,7 @@ app.get('/', (req, res) => {
             document.documentElement.classList.add('dark');
         }
         async function triggerSync(type) {
-            const button = document.querySelector('button[onclick="triggerSync(\\'' + type + '\\')"]');
+            const button = document.querySelector('button[onclick="triggerSync(\'' + type + '\')"]');
             const spinner = document.getElementById(type + 'Spinner');
             const overlay = document.getElementById('loadingOverlay');
             button.disabled = true;
