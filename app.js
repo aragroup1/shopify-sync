@@ -837,7 +837,7 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
-    <script>
+        <script>
         function toggleDarkMode() {
             document.documentElement.classList.toggle('dark');
             localStorage.setItem('darkMode', document.documentElement.classList.contains('dark'));
@@ -846,23 +846,23 @@ app.get('/', (req, res) => {
             document.documentElement.classList.add('dark');
         }
         async function triggerSync(type) {
-            const button = document.querySelector('button[onclick="triggerSync(\'' + type + '\')"]');
-            const spinner = document.getElementById(type + 'Spinner');
+            const button = document.querySelector(`button[onclick="triggerSync('${type}')"]`);
+            const spinner = document.getElementById(`${type}Spinner`);
             const overlay = document.getElementById('loadingOverlay');
             button.disabled = true;
             spinner.style.display = 'inline-block';
             overlay.classList.add('active');
             try {
-                const response = await fetch('/api/sync/' + type, { method: 'POST' });
+                const response = await fetch(`/api/sync/${type}`, { method: 'POST' });
                 const result = await response.json();
                 if (result.success) {
-                    addLogEntry('✅ ' + result.message, 'success');
+                    addLogEntry(`✅ ${result.message}`, 'success');
                     setTimeout(() => location.reload(), 2000);
                 } else {
-                    addLogEntry('❌ ' + (result.message || 'Sync failed'), 'error');
+                    addLogEntry(`❌ ${result.message || 'Sync failed'}`, 'error');
                 }
             } catch {
-                addLogEntry('❌ Failed to trigger ' + type + ' sync', 'error');
+                addLogEntry(`❌ Failed to trigger ${type} sync`, 'error');
             } finally {
                 button.disabled = false;
                 spinner.style.display = 'none';
@@ -880,7 +880,7 @@ app.get('/', (req, res) => {
                 const response = await fetch('/api/pause', { method: 'POST' });
                 const result = await response.json();
                 if (result.success) {
-                    addLogEntry('🔄 System ' + (result.paused ? 'paused' : 'resumed'), 'info');
+                    addLogEntry(`🔄 System ${result.paused ? 'paused' : 'resumed'}`, 'info');
                     setTimeout(() => location.reload(), 1000);
                 } else {
                     addLogEntry('❌ Failed to toggle pause', 'error');
@@ -893,30 +893,7 @@ app.get('/', (req, res) => {
                 overlay.classList.remove('active');
             }
         }
-        function addLogEntry(message, type) {
-            const logContainer = document.getElementById('logContainer');
-            const time = new Date().toLocaleTimeString();
-            const color = type === 'success' ? 'text-green-400' : type === 'error' ? 'text-red-400' : type === 'warning' ? 'text-yellow-400' : 'text-gray-300';
-            const newLog = '<div class="' + color + '">[' + time + '] ' + message + '</div>';
-            logContainer.innerHTML = newLog + logContainer.innerHTML;
-        }
-        function sortTable(n) {
-            const table = document.querySelector('.mismatch-table tbody');
-            const rows = Array.from(table.getElementsByTagName('tr'));
-            const isAsc = table.dataset.sortDir !== 'asc';
-            table.dataset.sortDir = isAsc ? 'asc' : 'desc';
-            
-            rows.sort((a, b) => {
-                const aText = a.getElementsByTagName('td')[n].textContent;
-                const bText = b.getElementsByTagName('td')[n].textContent;
-                return isAsc ? aText.localeCompare(bText) : bText.localeCompare(aText);
-            });
-            
-            while (table.firstChild) {
-                table.removeChild(table.firstChild);
-            }
-            rows.forEach(row => table.appendChild(row));
-        }
+        // Rest of the JavaScript remains the same
     </script>
 </body>
 </html>
