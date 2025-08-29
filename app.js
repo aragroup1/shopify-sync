@@ -118,15 +118,16 @@ app.get('/', (req, res) => {
         <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
             <h2 class="text-xl font-semibold text-gray-900 mb-4">Activity Log</h2>
             <div class="bg-black rounded-lg p-4 h-64 overflow-y-auto font-mono text-sm" id="logContainer">
-                ${logs.map(log => (
-                  '<div class="' +
-                  (log.type === 'success' ? 'text-green-400' :
-                   log.type === 'error' ? 'text-red-400' :
-                   log.type === 'warning' ? 'text-yellow-400' :
-                   'text-gray-300') +
-                  '">[' + new Date(log.timestamp).toLocaleTimeString() + '] ' +
-                  log.message + '</div>'
-                )).join('')}
+               ${logs.map(log =>
+  '<div class="' +
+  (log.type === 'success' ? 'text-green-400' :
+   log.type === 'error' ? 'text-red-400' :
+   log.type === 'warning' ? 'text-yellow-400' :
+   'text-gray-300') +
+  '">[' + new Date(log.timestamp).toLocaleTimeString() + '] ' +
+  log.message + '</div>'
+).join('')}
+
             </div>
         </div>
     </div>
