@@ -809,14 +809,14 @@ app.get('/', (req, res) => {
                         </tr>
                     </thead>
                     <tbody>
-                        ${mismatches.map(mismatch => `
-                            <tr class="border-b dark:border-gray-700">
-                                <td class="px-4 py-2">${mismatch.apifyTitle}</td>
-                                <td class="px-4 py-2">${mismatch.apifyHandle}</td>
-                                <td class="px-4 py-2">${mismatch.apifyUrl}</td>
-                                <td class="px-4 py-2">${mismatch.shopifyHandle}</td>
-                            </tr>
-                        `).join('')}
+                       ${mismatches.map(mismatch => `
+    <tr class="border-b dark:border-gray-700">
+        <td class="px-4 py-2">${mismatch.apifyTitle}</td>
+        <td class="px-4 py-2">${mismatch.apifyHandle}</td>
+        <td class="px-4 py-2">${mismatch.apifyUrl}</td>
+        <td class="px-4 py-2">${mismatch.shopifyHandle}</td>
+    </tr>
+`).join('')}
                     </tbody>
                 </table>
             </div>
