@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
+const SHOPIFY_API_BASE = `https://${process.env.SHOPIFY_API_KEY}:${process.env.SHOPIFY_PASSWORD}@${process.env.SHOPIFY_STORE}/admin/api/2023-10`;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
