@@ -131,7 +131,7 @@ function normalizeHandle(input, index, isTitle = false) {
   if (!isTitle && handle && handle !== 'undefined') {
     handle = handle.replace(config.apify.urlPrefix, '')
       .replace(/\.html$/, '')
-      .replace(/\s*\(.*?\)\s*/g, '')
+      .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
       .replace(/[^a-z0-9-]+/g, '-')
       .replace(/-+/g, '-')
       .replace(/^-|-$/g, '')
@@ -146,7 +146,7 @@ function normalizeHandle(input, index, isTitle = false) {
   handle = (isTitle ? input : `product-${index}`).toLowerCase()
     .replace(/\b\d{4}\b/g, '')
     .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
-    .replace(/\s*\(.*?\)\s*/g, '')
+    .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
     .replace(/[^a-z0-9-]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
@@ -205,7 +205,7 @@ function generateSEODescription(product) {
   return seoDescription;
 }
 
-function processApifyProducts(apifyData) {
+function processApifyProducts(apifyData, options = { processPrice: true }) {
   return apifyData.map((item, index) => {
     const handle = extractHandleFromCanonicalUrl(item, index);
     if (!handle) {
@@ -214,42 +214,94 @@ function processApifyProducts(apifyData) {
       return null;
     }
 
-    let price = 0;
-    if (item.variants && item.variants.length > 0) {
-      const variant = item.variants[0];
-      if (variant.price) {
-        price = typeof variant.price === 'object' ? parseFloat(variant.price.current || 0) : parseFloat(variant.price);
-      }
-    }
-    if (price === 0) price = parseFloat(item.price || 0);
-    if (price > 100) price = price / 100;
-
-    let finalPrice = 0;
-    if (price <= 1) finalPrice = price + 6;
-    else if (price <= 2) finalPrice = price + 7;
-    else if (price <= 3) finalPrice = price + 8;
-    else if (price <= 5) finalPrice = price + 9;
-    else if (price <= 8) finalPrice = price + 10;
-    else if (price <= 15) finalPrice = price * 2;
-    else finalPrice = price * 2.2;
-
-    if (finalPrice === 0) { 
-      addLog(`Default price applied for ${item.title}: 5.00 → 15.00`, 'warning');
-      price = 5.00; 
-      finalPrice = 15.00; 
-    }
-    if (finalPrice > 100) {
-      addLog(`Price capped for ${item.title}: ${finalPrice.toFixed(2)} → 100.00`, 'warning');
-      finalPrice = 100.00;
-    }
-
+    // Clean title
     let cleanTitle = item.title || 'Untitled Product';
     cleanTitle = cleanTitle.replace(/\b\d{4}\b/g, '')
       .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
-      .replace(/\s*\(.*?\)\s*/g, '')
+      .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
       .replace(/\s+/g, ' ')
       .trim();
 
+    // Process inventory
+    let inventory = item.variants?.[0]?.stockQuantity || item.stock || 20;
+    const stockStatus = item.variants?.[0]?.price?.stockStatus;
+    if (stockStatus === 'OUT_OF_STOCK') {
+      inventory = 0;
+    } else if (stockStatus === 'IN_STOCK' && inventory === 0) {
+      inventory = 20;
+    }
+
+    if (index < 5) {
+      addLog(`Inventory debug for ${cleanTitle}: stockQuantity=${item.variants?.[0]?.stockQuantity || 'N/A'}, stock=${item.stock || 'N/A'}, stockStatus=${stockStatus || 'N/A'}, final=${inventory}`, 'info');
+    }
+
+    // Process price only if needed
+    let price = 0;
+    let finalPrice = 0;
+    let compareAtPrice = 0;
+    
+    if (options.processPrice) {
+      // Extract price from various possible locations
+      if (item.variants && item.variants.length > 0) {
+        const variant = item.variants[0];
+        if (variant.price) {
+          price = typeof variant.price === 'object' ? parseFloat(variant.price.current || 0) : parseFloat(variant.price);
+        }
+      }
+      if (price === 0) price = parseFloat(item.price || 0);
+      
+      // Improved currency detection
+      const originalPrice = price;
+      
+      // If price has decimals and is less than 10, it's likely already in pounds
+      if (price > 0 && price < 10 && price.toString().includes('.')) {
+        // Already in pounds, no conversion needed
+        if (index < 5) {
+          addLog(`Price appears to be in pounds already: ${price}`, 'info');
+        }
+      } 
+      // If price is a whole number > 50, it's likely in pence
+      else if (price > 50 && !price.toString().includes('.')) {
+        price = price / 100;
+        if (index < 5) {
+          addLog(`Price converted from pence: ${originalPrice} → ${price}`, 'info');
+        }
+      }
+      // If price > 1000, definitely pence
+      else if (price > 1000) {
+        price = price / 100;
+        if (index < 5) {
+          addLog(`Price converted from pence (high value): ${originalPrice} → ${price}`, 'info');
+        }
+      }
+      
+      // Apply markup based on price ranges
+      if (price <= 1) finalPrice = price + 6;
+      else if (price <= 2) finalPrice = price + 7;
+      else if (price <= 3) finalPrice = price + 8;
+      else if (price <= 5) finalPrice = price + 9;
+      else if (price <= 8) finalPrice = price + 10;
+      else if (price <= 15) finalPrice = price * 2;
+      else if (price <= 30) finalPrice = price * 2.2;
+      else if (price <= 50) finalPrice = price * 1.8;
+      else if (price <= 75) finalPrice = price * 1.6;
+      else finalPrice = price * 1.4;
+
+      // Ensure minimum price
+      if (finalPrice === 0 || finalPrice < 5) { 
+        addLog(`Minimum price applied for ${item.title}: ${price.toFixed(2)} → 15.00`, 'warning');
+        price = 5.00; 
+        finalPrice = 15.00; 
+      }
+      
+      compareAtPrice = (finalPrice * 1.2).toFixed(2);
+
+      if (index < 5) {
+        addLog(`Price debug for ${cleanTitle}: original=${originalPrice}, base=${price.toFixed(2)}, final=${finalPrice.toFixed(2)}`, 'info');
+      }
+    }
+
+    // Process images
     const images = [];
     if (item.medias && Array.isArray(item.medias)) {
       for (let i = 0; i < Math.min(3, item.medias.length); i++) {
@@ -259,27 +311,23 @@ function processApifyProducts(apifyData) {
       }
     }
 
-    let inventory = item.variants?.[0]?.stockQuantity || item.stock || 10;
-    const stockStatus = item.variants?.[0]?.price?.stockStatus;
-    if (stockStatus === 'OUT_OF_STOCK') {
-      inventory = 0;
-    } else if (stockStatus === 'IN_STOCK' && inventory === 0) {
-      inventory = 10;
-    }
-
-    if (index < 5) {
-      addLog(`Inventory debug for ${cleanTitle}: stockQuantity=${item.variants?.[0]?.stockQuantity || 'N/A'}, stock=${item.stock || 'N/A'}, stockStatus=${stockStatus || 'N/A'}, final=${inventory}`, 'info');
-      addLog(`Price debug for ${cleanTitle}: base=${price.toFixed(2)}, final=${finalPrice.toFixed(2)}`, 'info');
-    }
-
     const productData = {
-      handle, title: cleanTitle,
+      handle, 
+      title: cleanTitle,
       description: item.description || `${cleanTitle}\n\nHigh-quality product from LandOfEssentials.`,
-      sku: item.sku || '', originalPrice: price.toFixed(2), price: finalPrice.toFixed(2),
-      compareAtPrice: (finalPrice * 1.2).toFixed(2), inventory, images, vendor: 'LandOfEssentials'
+      sku: item.sku || '', 
+      originalPrice: price.toFixed(2), 
+      price: finalPrice.toFixed(2),
+      compareAtPrice,
+      inventory, 
+      images, 
+      vendor: 'LandOfEssentials'
     };
 
-    productData.seoDescription = generateSEODescription(productData);
+    if (options.processPrice) {
+      productData.seoDescription = generateSEODescription(productData);
+    }
+
     return productData;
   }).filter(Boolean);
 }
@@ -365,7 +413,7 @@ async function handleDiscontinuedProducts() {
     addLog('Checking for discontinued products...', 'info');
     const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]);
     
-    const processedApifyProducts = processApifyProducts(apifyData);
+    const processedApifyProducts = processApifyProducts(apifyData, { processPrice: false });
     const currentApifyHandles = new Set(processedApifyProducts.map(p => p.handle));
     
     const discontinuedProducts = shopifyData.filter(shopifyProduct => 
@@ -417,7 +465,7 @@ async function updateInventory() {
     return { updated: 0, created: 0, errors: 0, total: 0 };
   }
 
-  let updated = 0, created = 0, errors = 0;
+  let updated = 0, errors = 0;
   mismatches = [];
   try {
     addLog('=== STARTING INVENTORY UPDATE WORKFLOW ===', 'info');
@@ -425,7 +473,8 @@ async function updateInventory() {
     
     addLog(`Data comparison: ${apifyData.length} Apify products vs ${shopifyData.length} Shopify products`, 'info');
     
-    const processedProducts = processApifyProducts(apifyData);
+    // Process products WITHOUT price processing for inventory updates
+    const processedProducts = processApifyProducts(apifyData, { processPrice: false });
     addLog(`Processed ${processedProducts.length} valid Apify products after filtering`, 'info');
     
     const shopifyMap = new Map(shopifyData.map(p => [p.handle.toLowerCase(), p]));
@@ -436,20 +485,20 @@ async function updateInventory() {
     let skippedSameInventory = 0;
     let skippedUnreliableZero = 0;
     const inventoryUpdates = [];
-    const newProducts = [];
     
     processedProducts.forEach((apifyProduct, index) => {
       const shopifyProduct = shopifyMap.get(apifyProduct.handle.toLowerCase());
       
       if (!shopifyProduct) {
-        addLog(`No Shopify match for: ${apifyProduct.handle} (title: ${apifyProduct.title}, url: ${apifyProduct.url || apifyProduct.canonicalUrl || 'N/A'})`, 'warning');
+        if (index < 10) {
+          addLog(`No Shopify match for: ${apifyProduct.handle} (title: ${apifyProduct.title})`, 'warning');
+        }
         mismatches.push({
           apifyTitle: apifyProduct.title,
           apifyHandle: apifyProduct.handle,
           apifyUrl: apifyProduct.url || apifyProduct.canonicalUrl || 'N/A',
           shopifyHandle: 'N/A'
         });
-        newProducts.push(apifyProduct);
         return;
       }
       
@@ -457,7 +506,6 @@ async function updateInventory() {
       
       if (!shopifyProduct.variants || !shopifyProduct.variants[0]) {
         skippedNoVariants++;
-        addLog(`No variants for: ${shopifyProduct.handle}`, 'warning');
         return;
       }
       
@@ -471,7 +519,6 @@ async function updateInventory() {
       
       if (targetInventory === 0 && currentInventory > 0 && (!apifyProduct.stockStatus || apifyProduct.stockStatus !== 'OUT_OF_STOCK')) {
         skippedUnreliableZero++;
-        addLog(`Skipped unreliable zero inventory for: ${apifyProduct.handle} (current: ${currentInventory}, stockStatus: ${apifyProduct.stockStatus || 'N/A'})`, 'warning');
         return;
       }
       
@@ -494,7 +541,7 @@ async function updateInventory() {
     addLog(`Skipped (same inventory): ${skippedSameInventory}`, 'info');
     addLog(`Skipped (unreliable zero): ${skippedUnreliableZero}`, 'info');
     addLog(`Updates needed: ${inventoryUpdates.length}`, 'info');
-    addLog(`New products to create: ${newProducts.length}`, 'info');
+    addLog(`Mismatches: ${mismatches.length}`, 'info');
 
     for (const update of inventoryUpdates) {
       try {
@@ -514,24 +561,18 @@ async function updateInventory() {
       }
     }
 
-    if (newProducts.length > 0) {
-      addLog('Creating new products for unmatched Apify products...', 'info');
-      const createResult = await createNewProducts(newProducts);
-      created = createResult.created;
-      errors += createResult.errors;
-    }
-
     stats.lastSync = new Date().toISOString();
     addLog(`=== INVENTORY UPDATE COMPLETE ===`, 'info');
-    addLog(`Result: ${updated} updated, ${created} created, ${errors} errors`, (updated + created) > 0 ? 'success' : 'info');
-    return { updated, created, errors, total: inventoryUpdates.length + newProducts.length };
+    addLog(`Result: ${updated} updated, ${errors} errors`, updated > 0 ? 'success' : 'info');
+    return { updated, created: 0, errors, total: inventoryUpdates.length };
   } catch (error) {
     addLog(`Inventory update workflow failed: ${error.message}`, 'error');
     stats.errors++;
-    return { updated, created, errors: errors + 1, total: 0 };
+    return { updated, created: 0, errors: errors + 1, total: 0 };
   }
 }
 
+// API Routes
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
@@ -790,7 +831,7 @@ app.get('/', (req, res) => {
             </div>
             <div class="mt-4 p-4 rounded-lg bg-gray-100 dark:bg-gray-700">
                 <p class="text-sm text-gray-600 dark:text-gray-400"><strong>Manual controls work even when system is paused</strong></p>
-                <p class="text-sm text-blue-600 dark:text-blue-400 mt-1"><strong>Updated:</strong> Enhanced handle matching and sexy UI design</p>
+                <p class="text-sm text-blue-600 dark:text-blue-400 mt-1"><strong>Updated:</strong> Fixed price detection for decimal values</p>
             </div>
         </div>
 
@@ -807,7 +848,7 @@ app.get('/', (req, res) => {
                         </tr>
                     </thead>
                     <tbody>
-                        ${mismatches.map(mismatch => `
+                        ${mismatches.slice(0, 20).map(mismatch => `
                             <tr class="border-b dark:border-gray-700">
                                 <td class="px-4 py-2">${mismatch.apifyTitle || ''}</td>
                                 <td class="px-4 py-2">${mismatch.apifyHandle || ''}</td>
@@ -841,7 +882,6 @@ app.get('/', (req, res) => {
             localStorage.setItem('darkMode', document.documentElement.classList.contains('dark'));
         }
         
-        // Check dark mode preference on load
         if (localStorage.getItem('darkMode') === 'true') {
             document.documentElement.classList.add('dark');
         }
@@ -969,7 +1009,7 @@ app.post('/api/sync/products', async (req, res) => {
   try {
     addLog('Manual product sync triggered', 'info');
     const apifyData = await getApifyProducts();
-    const processedProducts = processApifyProducts(apifyData);
+    const processedProducts = processApifyProducts(apifyData, { processPrice: true });
     const shopifyData = await getShopifyProducts();
     const shopifyHandles = new Set(shopifyData.map(p => p.handle.toLowerCase()));
     const newProducts = processedProducts.filter(p => !shopifyHandles.has(p.handle.toLowerCase()));
@@ -986,7 +1026,7 @@ app.post('/api/sync/inventory', async (req, res) => {
   try {
     addLog('Manual inventory sync triggered', 'info');
     const result = await updateInventory();
-    res.json({ success: true, message: `Updated ${result.updated} products, created ${result.created} products`, data: result });
+    res.json({ success: true, message: `Updated ${result.updated} products`, data: result });
   } catch (error) {
     addLog(`Inventory sync failed: ${error.message}`, 'error');
     stats.errors++;
@@ -1027,7 +1067,7 @@ cron.schedule('0 */6 * * *', async () => {
   addLog('Starting scheduled product creation', 'info');
   try { 
     const apifyData = await getApifyProducts();
-    const processedProducts = processApifyProducts(apifyData);
+    const processedProducts = processApifyProducts(apifyData, { processPrice: true });
     const shopifyData = await getShopifyProducts();
     const shopifyHandles = new Set(shopifyData.map(p => p.handle.toLowerCase()));
     const newProducts = processedProducts.filter(p => !shopifyHandles.has(p.handle.toLowerCase()));
