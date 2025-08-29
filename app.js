@@ -767,8 +767,7 @@ app.get('/', (req, res) => {
                         </p>
                     </div>
                     <div class="flex items-center">
-                        <button onclick="togglePause()" 
-                                class="${systemPaused ? 'bg-green-500 hover:bg-green-600' : 'bg-red-500 hover:bg-red-600'} text-white px-4 py-2 rounded-lg btn-hover">
+                        <button onclick="togglePause()" class="${systemPaused ? 'bg-green-500 hover:bg-green-600' : 'bg-red-500 hover:bg-red-600'} text-white px-4 py-2 rounded-lg btn-hover">
                             ${systemPaused ? 'Resume System' : 'Pause System'}
                         </button>
                         <div id="pauseSpinner" class="spinner"></div>
@@ -824,99 +823,100 @@ app.get('/', (req, res) => {
         <div class="rounded-2xl p-6 card-hover fade-in log-container">
             <h2 class="text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-4">Activity Log</h2>
             <div class="bg-gray-900 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm" id="logContainer">
-                ${logs.map(log => 
-                    `<div class="${
-                        log.type === 'success' ? 'text-green-400' :
+                ${logs.map(log => `
+                    <div class="${log.type === 'success' ? 'text-green-400' :
                         log.type === 'error' ? 'text-red-400' :
                         log.type === 'warning' ? 'text-yellow-400' :
-                        'text-gray-300'
-                    }">[${new Date(log.timestamp).toLocaleTimeString()}] ${log.message}</div>`
-                ).join('')}
+                        'text-gray-300'}">[${new Date(log.timestamp).toLocaleTimeString()}] ${log.message}</div>
+                `).join('')}
             </div>
         </div>
     </div>
 
     <script>
-        function toggleDarkMode() {
-            document.documentElement.classList.toggle('dark');
-            localStorage.setItem('darkMode', document.documentElement.classList.contains('dark'));
-        }
-        if (localStorage.getItem('darkMode') === 'true') {
-            document.documentElement.classList.add('dark');
-        }
-        async function triggerSync(type) {
-            const button = document.querySelector('button[onclick="triggerSync(\\'' + type + '\\')"]');
-            const spinner = document.getElementById(type + 'Spinner');
-            const overlay = document.getElementById('loadingOverlay');
-            button.disabled = true;
-            spinner.style.display = 'inline-block';
-            overlay.classList.add('active');
-            try {
-                const response = await fetch('/api/sync/' + type, { method: 'POST' });
-                const result = await response.json();
-                if (result.success) {
-                    addLogEntry('✅ ' + result.message, 'success');
-                    setTimeout(() => location.reload(), 2000);
-                } else {
-                    addLogEntry('❌ ' + (result.message || 'Sync failed'), 'error');
-                }
-            } catch {
-                addLogEntry('❌ Failed to trigger ' + type + ' sync', 'error');
-            } finally {
-                button.disabled = false;
-                spinner.style.display = 'none';
-                overlay.classList.remove('active');
+    function toggleDarkMode() {
+        document.documentElement.classList.toggle('dark');
+        localStorage.setItem('darkMode', document.documentElement.classList.contains('dark'));
+    }
+    if (localStorage.getItem('darkMode') === 'true') {
+        document.documentElement.classList.add('dark');
+    }
+    async function triggerSync(type) {
+        const button = document.querySelector(`button[onclick="triggerSync('${type}')"]`);
+        const spinner = document.getElementById(`${type}Spinner`);
+        const overlay = document.getElementById('loadingOverlay');
+        button.disabled = true;
+        spinner.style.display = 'inline-block';
+        overlay.classList.add('active');
+        try {
+            const response = await fetch(`/api/sync/${type}`, { method: 'POST' });
+            const result = await response.json();
+            if (result.success) {
+                addLogEntry(`✅ ${result.message}`, 'success');
+                setTimeout(() => location.reload(), 2000);
+            } else {
+                addLogEntry(`❌ ${result.message || 'Sync failed'}`, 'error');
             }
+        } catch (error) {
+            addLogEntry(`❌ Failed to trigger ${type} sync`, 'error');
+        } finally {
+            button.disabled = false;
+            spinner.style.display = 'none';
+            overlay.classList.remove('active');
         }
-        async function togglePause() {
-            const button = document.querySelector('button[onclick="togglePause()"]');
-            const spinner = document.getElementById('pauseSpinner');
-            const overlay = document.getElementById('loadingOverlay');
-            button.disabled = true;
-            spinner.style.display = 'inline-block';
-            overlay.classList.add('active');
-            try {
-                const response = await fetch('/api/pause', { method: 'POST' });
-                const result = await response.json();
-                if (result.success) {
-                    addLogEntry('🔄 System ' + (result.paused ? 'paused' : 'resumed'), 'info');
-                    setTimeout(() => location.reload(), 1000);
-                } else {
-                    addLogEntry('❌ Failed to toggle pause', 'error');
-                }
-            } catch {
+    }
+    async function togglePause() {
+        const button = document.querySelector('button[onclick="togglePause()"]');
+        const spinner = document.getElementById('pauseSpinner');
+        const overlay = document.getElementById('loadingOverlay');
+        button.disabled = true;
+        spinner.style.display = 'inline-block';
+        overlay.classList.add('active');
+        try {
+            const response = await fetch('/api/pause', { method: 'POST' });
+            const result = await response.json();
+            if (result.success) {
+                addLogEntry(`🔄 System ${result.paused ? 'paused' : 'resumed'}`, 'info');
+                setTimeout(() => location.reload(), 1000);
+            } else {
                 addLogEntry('❌ Failed to toggle pause', 'error');
-            } finally {
-                button.disabled = false;
-                spinner.style.display = 'none';
-                overlay.classList.remove('active');
             }
+        } catch (error) {
+            addLogEntry('❌ Failed to toggle pause', 'error');
+        } finally {
+            button.disabled = false;
+            spinner.style.display = 'none';
+            overlay.classList.remove('active');
         }
-        function addLogEntry(message, type) {
-            const logContainer = document.getElementById('logContainer');
-            const time = new Date().toLocaleTimeString();
-            const color = type === 'success' ? 'text-green-400' : type === 'error' ? 'text-red-400' : type === 'warning' ? 'text-yellow-400' : 'text-gray-300';
-            const newLog = '<div class="' + color + '">[' + time + '] ' + message + '</div>';
-            logContainer.innerHTML = newLog + logContainer.innerHTML;
+    }
+    function addLogEntry(message, type) {
+        const logContainer = document.getElementById('logContainer');
+        const time = new Date().toLocaleTimeString();
+        const color = type === 'success' ? 'text-green-400' :
+                      type === 'error' ? 'text-red-400' :
+                      type === 'warning' ? 'text-yellow-400' :
+                      'text-gray-300';
+        const newLog = `<div class="${color}">[${time}] ${message}</div>`;
+        logContainer.innerHTML = newLog + logContainer.innerHTML;
+    }
+    function sortTable(n) {
+        const table = document.querySelector('.mismatch-table tbody');
+        const rows = Array.from(table.getElementsByTagName('tr'));
+        const isAsc = table.dataset.sortDir !== 'asc';
+        table.dataset.sortDir = isAsc ? 'asc' : 'desc';
+
+        rows.sort((a, b) => {
+            const aText = a.getElementsByTagName('td')[n].textContent;
+            const bText = b.getElementsByTagName('td')[n].textContent;
+            return isAsc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+        });
+
+        while (table.firstChild) {
+            table.removeChild(table.firstChild);
         }
-        function sortTable(n) {
-            const table = document.querySelector('.mismatch-table tbody');
-            const rows = Array.from(table.getElementsByTagName('tr'));
-            const isAsc = table.dataset.sortDir !== 'asc';
-            table.dataset.sortDir = isAsc ? 'asc' : 'desc';
-            
-            rows.sort((a, b) => {
-                const aText = a.getElementsByTagName('td')[n].textContent;
-                const bText = b.getElementsByTagName('td')[n].textContent;
-                return isAsc ? aText.localeCompare(bText) : bText.localeCompare(aText);
-            });
-            
-            while (table.firstChild) {
-                table.removeChild(table.firstChild);
-            }
-            rows.forEach(row => table.appendChild(row));
-        }
-    </script>
+        rows.forEach(row => table.appendChild(row));
+    }
+</script>
 </body>
 </html>
   `);
