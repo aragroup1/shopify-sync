@@ -42,7 +42,7 @@ const shopifyClient = axios.create({
     'X-Shopify-Access-Token': config.shopify.accessToken,
     'Content-Type': 'application/json'
   },
-  timeout: 15000
+  timeout: 35000
 });
 
 // Helper functions
