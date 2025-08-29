@@ -1,6 +1,8 @@
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
+// If it's in apify.js
+const { getApifyProducts } = require("./apify");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
