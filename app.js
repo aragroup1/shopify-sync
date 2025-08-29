@@ -77,39 +77,49 @@ async function getApifyProducts() {
   return allItems;
 }
 
-async function getShopifyProducts() {
+async function getShopifyProducts(includeAll = false) {
   let allProducts = [];
-  let sinceId = null;
-  let pageCount = 0;
-  const limit = 250;
-  const fields = 'id,handle,title,variants,tags';
-  
-  addLog('Starting Shopify product fetch...', 'info');
-  
-  while (true) {
-    let url = `/products.json?limit=${limit}&fields=${fields}`;
-    if (sinceId) url += `&since_id=${sinceId}`;
-    
-    const response = await shopifyClient.get(url);
-    const products = response.data.products;
-    allProducts.push(...products);
-    pageCount++;
-    
-    addLog(`Shopify page ${pageCount}: fetched ${products.length} products (total: ${allProducts.length})`, 'info');
-    
-    if (products.length < limit) break;
-    sinceId = products[products.length - 1].id;
-    await new Promise(resolve => setTimeout(resolve, 1000));
+  let endpoint = `${SHOPIFY_API_BASE}/products.json?limit=250&page=1`;
+
+  while (endpoint) {
+    const response = await fetch(endpoint, {
+      headers: {
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "Content-Type": "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Shopify products: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    allProducts = allProducts.concat(data.products);
+
+    // Pagination
+    const linkHeader = response.headers.get("link");
+    if (linkHeader && linkHeader.includes('rel="next"')) {
+      const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+      endpoint = match ? match[1] : null;
+    } else {
+      endpoint = null;
+    }
   }
-  
-  const apifyTaggedProducts = allProducts.filter(p => p.tags && p.tags.includes('Supplier:Apify'));
-  addLog(`Shopify fetch complete: ${allProducts.length} total products, ${apifyTaggedProducts.length} with Supplier:Apify tag`, 'info');
-  
-  // Log sample products for debugging
-  addLog(`Sample Shopify products: ${apifyTaggedProducts.slice(0, 3).map(p => `${p.handle} (inv: ${p.variants?.[0]?.inventory_quantity || 'N/A'})`).join(', ')}`, 'info');
-  
-  return apifyTaggedProducts;
+
+  if (includeAll) {
+    return allProducts;
+  }
+
+  // ✅ Safer tag filtering
+  return allProducts.filter(p => {
+    if (!p.tags) return false;
+    return p.tags
+      .split(",")
+      .map(tag => tag.trim().toLowerCase())
+      .includes("supplier:apify".toLowerCase());
+  });
 }
+
 
 // Generate SEO-friendly description
 function generateSEODescription(product) {
