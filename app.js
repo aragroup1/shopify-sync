@@ -477,28 +477,121 @@ async function updateInventory() {
     const processedProducts = processApifyProducts(apifyData, { processPrice: false });
     addLog(`Processed ${processedProducts.length} valid Apify products after filtering`, 'info');
     
-    const shopifyMap = new Map(shopifyData.map(p => [p.handle.toLowerCase(), p]));
-    addLog(`Created Shopify lookup map with ${shopifyMap.size} products`, 'info');
+    // Create multiple lookup maps for better matching
+    const shopifyHandleMap = new Map(shopifyData.map(p => [p.handle.toLowerCase(), p]));
+    const shopifyTitleMap = new Map();
+    const shopifySkuMap = new Map();
+    
+    // Build additional maps for fallback matching
+    shopifyData.forEach(product => {
+      // Clean title for matching
+      const cleanTitle = product.title.toLowerCase()
+        .replace(/\b\d{4}\b/g, '')
+        .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
+        .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+      shopifyTitleMap.set(cleanTitle, product);
+      
+      // Map by SKU if available
+      if (product.variants && product.variants[0] && product.variants[0].sku) {
+        shopifySkuMap.set(product.variants[0].sku.toLowerCase(), product);
+      }
+      
+      // Also try alternative handle formats
+      const altHandle = product.handle.replace(/-\d+$/, ''); // Remove trailing numbers
+      if (altHandle !== product.handle) {
+        shopifyHandleMap.set(altHandle.toLowerCase(), product);
+      }
+    });
+    
+    addLog(`Created Shopify lookup maps: ${shopifyHandleMap.size} handles, ${shopifyTitleMap.size} titles, ${shopifySkuMap.size} SKUs`, 'info');
     
     let matchedCount = 0;
+    let matchedByHandle = 0;
+    let matchedByTitle = 0;
+    let matchedBySku = 0;
     let skippedNoVariants = 0;
     let skippedSameInventory = 0;
     let skippedUnreliableZero = 0;
     const inventoryUpdates = [];
+    const debugSample = [];
     
     processedProducts.forEach((apifyProduct, index) => {
-      const shopifyProduct = shopifyMap.get(apifyProduct.handle.toLowerCase());
+      let shopifyProduct = null;
+      let matchType = '';
       
-      if (!shopifyProduct) {
-        if (index < 10) {
-          addLog(`No Shopify match for: ${apifyProduct.handle} (title: ${apifyProduct.title})`, 'warning');
+      // Try to match by handle first
+      shopifyProduct = shopifyHandleMap.get(apifyProduct.handle.toLowerCase());
+      if (shopifyProduct) {
+        matchType = 'handle';
+        matchedByHandle++;
+      }
+      
+      // Try to match by SKU if handle didn't work
+      if (!shopifyProduct && apifyProduct.sku) {
+        shopifyProduct = shopifySkuMap.get(apifyProduct.sku.toLowerCase());
+        if (shopifyProduct) {
+          matchType = 'SKU';
+          matchedBySku++;
         }
-        mismatches.push({
+      }
+      
+      // Try to match by cleaned title if still no match
+      if (!shopifyProduct) {
+        const cleanApifyTitle = apifyProduct.title.toLowerCase()
+          .replace(/\b\d{4}\b/g, '')
+          .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
+          .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim();
+        shopifyProduct = shopifyTitleMap.get(cleanApifyTitle);
+        if (shopifyProduct) {
+          matchType = 'title';
+          matchedByTitle++;
+        }
+      }
+      
+      // Try partial handle match as last resort
+      if (!shopifyProduct) {
+        // Try to find a product whose handle contains our handle or vice versa
+        const handleParts = apifyProduct.handle.split('-').filter(p => p.length > 3);
+        for (const [shopifyHandle, product] of shopifyHandleMap) {
+          let isMatch = false;
+          // Check if handles share significant parts
+          if (handleParts.length > 2) {
+            const matchingParts = handleParts.filter(part => shopifyHandle.includes(part));
+            if (matchingParts.length >= handleParts.length * 0.6) {
+              shopifyProduct = product;
+              matchType = 'partial-handle';
+              isMatch = true;
+              break;
+            }
+          }
+        }
+      }
+      
+      // Log debug info for first few products
+      if (index < 10) {
+        debugSample.push({
           apifyTitle: apifyProduct.title,
           apifyHandle: apifyProduct.handle,
-          apifyUrl: apifyProduct.url || apifyProduct.canonicalUrl || 'N/A',
-          shopifyHandle: 'N/A'
+          apifySku: apifyProduct.sku,
+          matched: !!shopifyProduct,
+          matchType: matchType || 'none',
+          shopifyHandle: shopifyProduct?.handle || 'N/A'
         });
+      }
+      
+      if (!shopifyProduct) {
+        if (mismatches.length < 100) { // Only store first 100 mismatches
+          mismatches.push({
+            apifyTitle: apifyProduct.title,
+            apifyHandle: apifyProduct.handle,
+            apifyUrl: apifyProduct.url || apifyProduct.canonicalUrl || 'N/A',
+            shopifyHandle: 'NOT FOUND'
+          });
+        }
         return;
       }
       
@@ -527,22 +620,33 @@ async function updateInventory() {
         title: shopifyProduct.title,
         currentInventory,
         newInventory: targetInventory,
-        inventoryItemId: shopifyProduct.variants[0].inventory_item_id
+        inventoryItemId: shopifyProduct.variants[0].inventory_item_id,
+        matchType
       });
       
       if (inventoryUpdates.length <= 5) {
-        addLog(`Update needed: ${apifyProduct.handle} (${currentInventory} → ${targetInventory})`, 'info');
+        addLog(`Update needed: ${apifyProduct.handle} (${currentInventory} → ${targetInventory}) [matched by ${matchType}]`, 'info');
       }
+    });
+    
+    // Log debug sample
+    addLog('=== MATCHING DEBUG SAMPLE ===', 'info');
+    debugSample.forEach(item => {
+      addLog(`${item.matched ? '✓' : '✗'} ${item.apifyTitle} | Handle: ${item.apifyHandle} | SKU: ${item.apifySku || 'none'} | Match: ${item.matchType} | Shopify: ${item.shopifyHandle}`, item.matched ? 'info' : 'warning');
     });
 
     addLog(`=== MATCHING ANALYSIS ===`, 'info');
-    addLog(`Matched products: ${matchedCount}`, 'info');
+    addLog(`Total matched: ${matchedCount} (${((matchedCount/processedProducts.length)*100).toFixed(1)}%)`, 'info');
+    addLog(`- Matched by handle: ${matchedByHandle}`, 'info');
+    addLog(`- Matched by SKU: ${matchedBySku}`, 'info');
+    addLog(`- Matched by title: ${matchedByTitle}`, 'info');
     addLog(`Skipped (no variants): ${skippedNoVariants}`, 'info');
     addLog(`Skipped (same inventory): ${skippedSameInventory}`, 'info');
     addLog(`Skipped (unreliable zero): ${skippedUnreliableZero}`, 'info');
     addLog(`Updates needed: ${inventoryUpdates.length}`, 'info');
-    addLog(`Mismatches: ${mismatches.length}`, 'info');
+    addLog(`Mismatches: ${processedProducts.length - matchedCount}`, 'warning');
 
+    // Process updates
     for (const update of inventoryUpdates) {
       try {
         await shopifyClient.post('/inventory_levels/set.json', {
@@ -550,7 +654,7 @@ async function updateInventory() {
           inventory_item_id: update.inventoryItemId,
           available: update.newInventory
         });
-        addLog(`✓ Updated: ${update.title} (${update.currentInventory} → ${update.newInventory})`, 'success');
+        addLog(`✓ Updated: ${update.title} (${update.currentInventory} → ${update.newInventory}) [${update.matchType}]`, 'success');
         updated++;
         stats.inventoryUpdates++;
         await new Promise(resolve => setTimeout(resolve, 500));
@@ -997,6 +1101,43 @@ app.get('/api/status', (req, res) => {
 
 app.get('/api/mismatches', (req, res) => {
   res.json({ mismatches });
+});
+
+app.get('/api/diagnose', async (req, res) => {
+  try {
+    addLog('Running diagnostic check...', 'info');
+    
+    const [apifyData, shopifyData] = await Promise.all([
+      getApifyProducts(),
+      getShopifyProducts()
+    ]);
+    
+    // Sample some products for analysis
+    const apifySample = apifyData.slice(0, 10);
+    const shopifySample = shopifyData.slice(0, 10);
+    
+    const diagnosis = {
+      apifyTotal: apifyData.length,
+      shopifyTotal: shopifyData.length,
+      shopifyWithApifyTag: shopifyData.filter(p => p.tags && p.tags.includes('Supplier:Apify')).length,
+      apifySample: apifySample.map(item => ({
+        title: item.title,
+        url: item.url || item.canonicalUrl || 'none',
+        sku: item.sku || 'none',
+        generatedHandle: extractHandleFromCanonicalUrl(item, 0)
+      })),
+      shopifySample: shopifySample.map(item => ({
+        title: item.title,
+        handle: item.handle,
+        sku: item.variants?.[0]?.sku || 'none',
+        tags: item.tags
+      }))
+    };
+    
+    res.json(diagnosis);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.post('/api/pause', (req, res) => {
