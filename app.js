@@ -150,16 +150,28 @@ function generateSEODescription(product) {
   return seoDescription;
 }
 
+function extractHandleFromCanonicalUrl(item, index) {
+  if (item.canonicalUrl) {
+    // Remove the base URL to get just the handle
+    const handle = item.canonicalUrl.replace('https://www.manchesterwholesale.co.uk/products/', '');
+    
+    // If we successfully extracted something and it's not the full URL, use it
+    if (handle && handle !== item.canonicalUrl && handle.length > 0) {
+      return handle;
+    }
+  }
+  
+  // Fallback to title-based handle if canonicalUrl is missing or invalid
+  const titleForHandle = item.title || `product-${index}`;
+  return titleForHandle.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .substring(0, 50);
+}
+
 function processApifyProducts(apifyData) {
   return apifyData.map((item, index) => {
-    let handle = '';
-    if (item.canonicalUrl) {
-      const parts = item.canonicalUrl.split('/');
-      handle = parts[parts.length - 1] || '';
-    } else {
-      const titleForHandle = item.title || `product-${index}`;
-      handle = titleForHandle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 50);
-    }
+    const handle = extractHandleFromCanonicalUrl(item, index);
 
     if (!handle) return null;
 
