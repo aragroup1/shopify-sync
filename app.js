@@ -1,7 +1,6 @@
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
-const SHOPIFY_API_BASE = `https://${process.env.SHOPIFY_API_KEY}:${process.env.SHOPIFY_PASSWORD}@${process.env.SHOPIFY_STORE}/admin/api/2023-10`;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -47,45 +46,16 @@ const shopifyClient = axios.create({
 });
 
 // Helper functions
-async function getApifyProducts() {
-  let allItems = [];
-  let offset = 0;
-  let pageCount = 0;
-  const limit = 500;
-  
-  addLog('Starting Apify product fetch...', 'info');
-  
-  while (true) {
-    const response = await apifyClient.get(
-      `/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=${limit}&offset=${offset}`
-    );
-    const items = response.data;
-    allItems.push(...items);
-    pageCount++;
-    
-    addLog(`Apify page ${pageCount}: fetched ${items.length} products (total: ${allItems.length})`, 'info');
-    
-    if (items.length < limit) break;
-    offset += limit;
-    await new Promise(resolve => setTimeout(resolve, 1000));
-  }
-  
-  addLog(`Apify fetch complete: ${allItems.length} total products`, 'info');
-  
-  // Log sample products for debugging
-  addLog(`Sample Apify products: ${allItems.slice(0, 3).map(p => `${p.title} (${p.sku || 'no-sku'})`).join(', ')}`, 'info');
-  
-  return allItems;
-}
-
 async function getShopifyProducts(includeAll = false) {
+  const SHOPIFY_API_BASE = `https://${process.env.SHOPIFY_API_KEY}:${process.env.SHOPIFY_PASSWORD}@${process.env.SHOPIFY_STORE}/admin/api/2023-10`;
+
   let allProducts = [];
   let endpoint = `${SHOPIFY_API_BASE}/products.json?limit=250&page=1`;
 
   while (endpoint) {
     const response = await fetch(endpoint, {
       headers: {
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN,
         "Content-Type": "application/json"
       }
     });
@@ -97,7 +67,7 @@ async function getShopifyProducts(includeAll = false) {
     const data = await response.json();
     allProducts = allProducts.concat(data.products);
 
-    // Pagination
+    // handle pagination
     const linkHeader = response.headers.get("link");
     if (linkHeader && linkHeader.includes('rel="next"')) {
       const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
@@ -111,15 +81,16 @@ async function getShopifyProducts(includeAll = false) {
     return allProducts;
   }
 
-  // ✅ Safer tag filtering
+  // tag-filtered (for discontinued detection)
   return allProducts.filter(p => {
     if (!p.tags) return false;
     return p.tags
       .split(",")
       .map(tag => tag.trim().toLowerCase())
-      .includes("supplier:apify".toLowerCase());
+      .includes("supplier:apify");
   });
 }
+
 
 
 // Generate SEO-friendly description
