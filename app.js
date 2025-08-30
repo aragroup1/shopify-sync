@@ -15,14 +15,28 @@ let mismatches = [];
 let failsafeTriggered = false;
 let failsafeReason = '';
 
-// Failsafe configuration
+// Telegram configuration
+const TELEGRAM_CONFIG = {
+  botToken: process.env.TELEGRAM_BOT_TOKEN || '7937540772:AAE8TV8FHYVogI-F4P4p08hLRqnovBV4O1Q',
+  chatId: process.env.TELEGRAM_CHAT_ID || '1596350649',
+  enabled: false
+};
+
+// Check if Telegram is configured
+if (TELEGRAM_CONFIG.botToken && TELEGRAM_CONFIG.chatId) {
+  TELEGRAM_CONFIG.enabled = true;
+  console.log('Telegram notifications enabled for chat ID:', TELEGRAM_CONFIG.chatId);
+}
+
+// Failsafe configuration with higher limits for initial setup
 const FAILSAFE_LIMITS = {
   MIN_APIFY_PRODUCTS: 100,
   MIN_SHOPIFY_PRODUCTS: 100,
   MAX_CHANGE_PERCENTAGE: 30,
   MAX_ERROR_RATE: 20,
-  MAX_DISCONTINUED_AT_ONCE: 100,
-  MAX_PRICE_CHANGES: 50,
+  MAX_DISCONTINUED_AT_ONCE: 50,
+  MAX_NEW_PRODUCTS_AT_ONCE: 500, // Raised for initial setup
+  MAX_NEW_PRODUCTS_TOTAL: 7000, // Allow creating up to 7000 products total
   FETCH_TIMEOUT: 300000
 };
 
@@ -38,6 +52,32 @@ function addLog(message, type = 'info') {
   logs.unshift(log);
   if (logs.length > 100) logs = logs.slice(0, 100);
   console.log(`[${log.timestamp}] ${message}`);
+}
+
+// Send Telegram notification
+async function sendTelegramNotification(message) {
+  if (!TELEGRAM_CONFIG.enabled) return;
+  
+  try {
+    const url = `https://api.telegram.org/bot${TELEGRAM_CONFIG.botToken}/sendMessage`;
+    await axios.post(url, {
+      chat_id: TELEGRAM_CONFIG.chatId,
+      text: message,
+      parse_mode: 'HTML'
+    });
+    addLog('Telegram notification sent', 'info');
+  } catch (error) {
+    addLog(`Failed to send Telegram notification: ${error.message}`, 'warning');
+  }
+}
+
+// Global failsafe check
+function checkGlobalFailsafe() {
+  if (failsafeTriggered) {
+    addLog('Operation blocked - failsafe is active', 'warning');
+    return false;
+  }
+  return true;
 }
 
 // Failsafe check function
@@ -73,11 +113,20 @@ function checkFailsafeConditions(context, data = {}) {
       if (data.toDiscontinue > FAILSAFE_LIMITS.MAX_DISCONTINUED_AT_ONCE) {
         checks.push(`Too many products to discontinue: ${data.toDiscontinue} > ${FAILSAFE_LIMITS.MAX_DISCONTINUED_AT_ONCE}`);
       }
+      if (data.totalProducts > 0 && data.toDiscontinue > data.totalProducts * 0.1) {
+        checks.push(`Attempting to discontinue ${data.toDiscontinue} products (>10% of ${data.totalProducts} total)`);
+      }
       break;
       
     case 'products':
-      if (data.toCreate > data.existingCount * (FAILSAFE_LIMITS.MAX_CHANGE_PERCENTAGE / 100)) {
-        checks.push(`Too many new products: ${data.toCreate} > ${Math.floor(data.existingCount * (FAILSAFE_LIMITS.MAX_CHANGE_PERCENTAGE / 100))}`);
+      // Check if this is initial setup
+      if (data.isInitialSetup) {
+        addLog('Initial setup mode - allowing larger product creation', 'info');
+        return true;
+      }
+      
+      if (data.toCreate > FAILSAFE_LIMITS.MAX_NEW_PRODUCTS_AT_ONCE) {
+        checks.push(`Too many new products to create at once: ${data.toCreate} > ${FAILSAFE_LIMITS.MAX_NEW_PRODUCTS_AT_ONCE}`);
       }
       break;
   }
@@ -88,6 +137,15 @@ function checkFailsafeConditions(context, data = {}) {
     systemPaused = true;
     addLog(`⚠️ FAILSAFE TRIGGERED: ${failsafeReason}`, 'error');
     addLog('System automatically paused to prevent potential damage', 'error');
+    
+    // Send Telegram notification
+    const telegramMessage = `🚨 <b>FAILSAFE TRIGGERED</b>\n\n` +
+      `<b>Context:</b> ${context}\n` +
+      `<b>Reason:</b> ${failsafeReason}\n\n` +
+      `System has been automatically paused.\n` +
+      `Check the dashboard immediately.`;
+    sendTelegramNotification(telegramMessage);
+    
     return false;
   }
   
@@ -99,7 +157,7 @@ const config = {
   apify: {
     token: process.env.APIFY_TOKEN,
     actorId: process.env.APIFY_ACTOR_ID || 'autofacts~shopify',
-    baseUrl: 'https://api.apify.com/v2',
+    baseUrl: 'https://api.telegram.org/bot7937540772:AAE8TV8FHYVogI-F4P4p08hLRqnovBV4O1Q/getUpdates',
     urlPrefix: process.env.URL_PREFIX || 'https://www.manchesterwholesale.co.uk/products/'
   },
   shopify: {
@@ -127,6 +185,10 @@ const shopifyClient = axios.create({
 
 // Helper functions with failsafe
 async function getApifyProducts() {
+  if (!checkGlobalFailsafe()) {
+    throw new Error('Operation blocked by failsafe');
+  }
+  
   let allItems = [];
   let offset = 0;
   let pageCount = 0;
@@ -157,6 +219,8 @@ async function getApifyProducts() {
     failsafeReason = `Apify fetch failed: ${error.message}`;
     systemPaused = true;
     addLog('⚠️ FAILSAFE: System paused due to Apify fetch failure', 'error');
+    
+    sendTelegramNotification(`🚨 <b>FAILSAFE: Apify Fetch Failed</b>\n\n${error.message}\n\nSystem paused.`);
     throw error;
   }
   
@@ -170,6 +234,10 @@ async function getApifyProducts() {
 }
 
 async function getShopifyProducts() {
+  if (!checkGlobalFailsafe()) {
+    throw new Error('Operation blocked by failsafe');
+  }
+  
   let allProducts = [];
   let sinceId = null;
   let pageCount = 0;
@@ -202,6 +270,8 @@ async function getShopifyProducts() {
     failsafeReason = `Shopify fetch failed: ${error.message}`;
     systemPaused = true;
     addLog('⚠️ FAILSAFE: System paused due to Shopify fetch failure', 'error');
+    
+    sendTelegramNotification(`🚨 <b>FAILSAFE: Shopify Fetch Failed</b>\n\n${error.message}\n\nSystem paused.`);
     throw error;
   }
   
@@ -218,7 +288,7 @@ async function getShopifyProducts() {
 function normalizeHandle(input, index, isTitle = false) {
   let handle = input || '';
   
-  if (!isTitle && handle && handle !== 'undefined') {
+  if (!isTitle && handle && handle !== 'undefined' && handle !== 'null') {
     handle = handle.replace(config.apify.urlPrefix, '')
       .replace(/\.html$/, '')
       .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
@@ -258,15 +328,28 @@ function normalizeHandle(input, index, isTitle = false) {
 
 function extractHandleFromCanonicalUrl(item, index) {
   const urlFields = [item.canonicalUrl, item.url, item.productUrl, item.source?.url];
-  const validUrl = urlFields.find(url => url && url !== 'undefined');
+  const validUrl = urlFields.find(url => url && url !== 'undefined' && url !== 'null');
   
   if (index < 5) {
-    addLog(`Debug product ${index}: canonicalUrl="${item.canonicalUrl}", url="${item.url}", productUrl="${item.productUrl}", title="${item.title}"`, 'info');
+    addLog(`Debug product ${index}: canonicalUrl="${item.canonicalUrl}", url="${item.url}", productUrl="${item.productUrl}", title="${item.title}", sku="${item.sku}"`, 'info');
   }
   
-  const handle = normalizeHandle(validUrl || item.title || `product-${index}`, index, !validUrl);
+  if (validUrl) {
+    const handle = normalizeHandle(validUrl, index, false);
+    if (handle && handle.length > 2) {
+      return handle;
+    }
+  }
   
-  if (!handle) {
+  let titleForHandle = item.title || `product-${index}`;
+  titleForHandle = titleForHandle
+    .replace(/\s*KATEX_INLINE_OPEN.*?(rate|Rate)KATEX_INLINE_CLOSE\s*$/gi, '')
+    .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*$/g, '')
+    .trim();
+  
+  const handle = normalizeHandle(titleForHandle, index, true);
+  
+  if (!handle || handle.length < 2) {
     return `product-${index}-${Date.now()}`;
   }
   
@@ -329,7 +412,7 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
 
     let inventory = item.variants?.[0]?.stockQuantity || item.stock || 20;
     const stockStatus = item.variants?.[0]?.price?.stockStatus;
-    if (stockStatus === 'OUT_OF_STOCK') {
+    if (stockStatus === 'OUT_OF_STOCK' || stockStatus === 'OutOfStock') {
       inventory = 0;
     } else if (stockStatus === 'IN_STOCK' && inventory === 0) {
       inventory = 20;
@@ -446,23 +529,57 @@ async function enableInventoryTracking(productId, variantId, inventoryItemId) {
 }
 
 async function createNewProducts(productsToCreate) {
+  if (!checkGlobalFailsafe()) {
+    return { created: 0, errors: 0, total: productsToCreate.length, blocked: true };
+  }
+  
   if (systemPaused) {
     addLog('Product creation skipped - system is paused', 'warning');
     return { created: 0, errors: 0, total: productsToCreate.length };
   }
 
+  // Check if this is initial setup
   const shopifyData = await getShopifyProducts();
-  if (!checkFailsafeConditions('products', { 
-    toCreate: productsToCreate.length, 
-    existingCount: shopifyData.length 
-  })) {
-    return { created: 0, errors: 0, total: productsToCreate.length };
+  const existingApifyProducts = shopifyData.filter(p => p.tags && p.tags.includes('Supplier:Apify')).length;
+  const isInitialSetup = existingApifyProducts < 1000;
+  
+  if (isInitialSetup) {
+    addLog(`Initial setup detected: ${existingApifyProducts} existing Apify products in Shopify`, 'info');
+    addLog(`Total products to create: ${productsToCreate.length}`, 'info');
+    
+    // Limit batch size but don't trigger failsafe
+    const batchLimit = FAILSAFE_LIMITS.MAX_NEW_PRODUCTS_AT_ONCE;
+    if (productsToCreate.length > batchLimit) {
+      productsToCreate = productsToCreate.slice(0, batchLimit);
+      addLog(`Processing batch of ${batchLimit} products (run multiple times to complete)`, 'info');
+      
+      sendTelegramNotification(
+        `📦 <b>Initial Setup Progress</b>\n\n` +
+        `Creating batch of ${batchLimit} products.\n` +
+        `Existing Apify products: ${existingApifyProducts}\n` +
+        `Run "Create New Products" multiple times to complete setup.`
+      );
+    }
+  } else {
+    // Normal failsafe check
+    if (!checkFailsafeConditions('products', { 
+      toCreate: productsToCreate.length, 
+      existingCount: shopifyData.length,
+      isInitialSetup: false
+    })) {
+      return { created: 0, errors: 0, total: productsToCreate.length };
+    }
   }
 
   let created = 0, errors = 0;
   const batchSize = 5;
   
   for (let i = 0; i < productsToCreate.length; i += batchSize) {
+    if (!checkGlobalFailsafe()) {
+      addLog('Product creation stopped - failsafe triggered', 'error');
+      break;
+    }
+    
     const batch = productsToCreate.slice(i, i + batchSize);
     
     for (const product of batch) {
@@ -538,31 +655,92 @@ async function createNewProducts(productsToCreate) {
   }
 
   addLog(`Product creation completed: ${created} created, ${errors} errors`, created > 0 ? 'success' : 'info');
+  
+  if (created > 0) {
+    sendTelegramNotification(
+      `✅ <b>Products Created</b>\n\n` +
+      `Successfully created: ${created} products\n` +
+      `Errors: ${errors}\n` +
+      `Total processed: ${productsToCreate.length}`
+    );
+  }
+  
   return { created, errors, total: productsToCreate.length };
 }
 
 async function handleDiscontinuedProducts() {
+  if (!checkGlobalFailsafe()) {
+    return { discontinued: 0, errors: 0, total: 0, blocked: true };
+  }
+  
   let discontinued = 0, errors = 0;
   try {
     addLog('Checking for discontinued products...', 'info');
     const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]);
     
     const processedApifyProducts = processApifyProducts(apifyData, { processPrice: false });
-    const currentApifyHandles = new Set(processedApifyProducts.map(p => p.handle));
     
-    const discontinuedProducts = shopifyData.filter(shopifyProduct => 
-      shopifyProduct.tags && 
-      shopifyProduct.tags.includes('Supplier:Apify') && 
-      !currentApifyHandles.has(shopifyProduct.handle)
-    );
+    const currentApifyHandles = new Set();
+    processedApifyProducts.forEach(p => {
+      currentApifyHandles.add(p.handle.toLowerCase());
+      const withoutNumbers = p.handle.replace(/-\d+$/, '');
+      if (withoutNumbers !== p.handle) {
+        currentApifyHandles.add(withoutNumbers.toLowerCase());
+      }
+    });
+    
+    const apifyTitles = new Set();
+    processedApifyProducts.forEach(p => {
+      const cleanTitle = p.title.toLowerCase()
+        .replace(/\b\d{4}\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      apifyTitles.add(cleanTitle);
+    });
+    
+    const discontinuedProducts = shopifyData.filter(shopifyProduct => {
+      if (!shopifyProduct.tags || !shopifyProduct.tags.includes('Supplier:Apify')) {
+        return false;
+      }
+      
+      if (currentApifyHandles.has(shopifyProduct.handle.toLowerCase())) {
+        return false;
+      }
+      
+      const shopifyCleanTitle = shopifyProduct.title.toLowerCase()
+        .replace(/\b\d{4}\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      
+      if (apifyTitles.has(shopifyCleanTitle)) {
+        return false;
+      }
+      
+      return true;
+    });
     
     addLog(`Found ${discontinuedProducts.length} potentially discontinued products`, 'info');
     
-    if (!checkFailsafeConditions('discontinued', { toDiscontinue: discontinuedProducts.length })) {
+    if (!checkFailsafeConditions('discontinued', { 
+      toDiscontinue: discontinuedProducts.length,
+      totalProducts: shopifyData.length 
+    })) {
       return { discontinued: 0, errors: 0, total: discontinuedProducts.length };
     }
     
+    if (discontinuedProducts.length > 0 && discontinuedProducts.length <= 10) {
+      addLog('Products to be discontinued:', 'warning');
+      discontinuedProducts.slice(0, 5).forEach(p => {
+        addLog(`  - ${p.title} (${p.handle})`, 'warning');
+      });
+    }
+    
     for (const product of discontinuedProducts) {
+      if (!checkGlobalFailsafe()) {
+        addLog('Discontinuation stopped - failsafe triggered', 'error');
+        break;
+      }
+      
       try {
         if (product.variants && product.variants[0]) {
           const currentInventory = product.variants[0].inventory_quantity || 0;
@@ -598,6 +776,10 @@ async function handleDiscontinuedProducts() {
 }
 
 async function updateInventory() {
+  if (!checkGlobalFailsafe()) {
+    return { updated: 0, created: 0, errors: 0, total: 0, blocked: true };
+  }
+  
   if (systemPaused) {
     addLog('Inventory update skipped - system is paused', 'warning');
     return { updated: 0, created: 0, errors: 0, total: 0 };
@@ -807,7 +989,14 @@ async function updateInventory() {
       return { updated: 0, created: 0, errors: 1, total: inventoryUpdates.length };
     }
 
+    const delayBetweenCalls = 600;
+
     for (const update of inventoryUpdates) {
+      if (!checkGlobalFailsafe()) {
+        addLog('Inventory update stopped - failsafe triggered', 'error');
+        break;
+      }
+      
       try {
         const variantResponse = await shopifyClient.get(`/products/${update.productId}.json?fields=variants`);
         const variant = variantResponse.data.product.variants[0];
@@ -851,7 +1040,7 @@ async function updateInventory() {
         addLog(`✓ Updated: ${update.title} (${update.currentInventory} → ${update.newInventory}) [${update.matchType}]`, 'success');
         updated++;
         stats.inventoryUpdates++;
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise(resolve => setTimeout(resolve, delayBetweenCalls));
       } catch (error) {
         errors++;
         stats.errors++;
@@ -910,6 +1099,16 @@ async function updateInventory() {
       addLog('  - Use "Fix Inventory Tracking" button to enable for all products', 'warning');
     }
     
+    if (updated > 50) {
+      sendTelegramNotification(
+        `📊 <b>Inventory Update Complete</b>\n\n` +
+        `Updated: ${updated} products\n` +
+        `Tracking enabled: ${trackingEnabled}\n` +
+        `Errors: ${errors}\n` +
+        `Total processed: ${inventoryUpdates.length}`
+      );
+    }
+    
     return { updated, created: 0, errors, total: inventoryUpdates.length, trackingEnabled };
   } catch (error) {
     addLog(`Inventory update workflow failed: ${error.message}`, 'error');
@@ -918,7 +1117,7 @@ async function updateInventory() {
   }
 }
 
-// API Routes
+// API Routes - Continuing from previous...
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
@@ -1007,33 +1206,14 @@ app.get('/', (req, res) => {
             height: 24px;
             animation: spin 1s linear infinite;
             margin-left: 8px;
+            display: inline-block;
+        }
+        .spinner.hidden {
+            display: none !important;
         }
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
-        }
-        .loading-overlay {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0, 0, 0, 0.8);
-            z-index: 1000;
-            align-items: center;
-            justify-content: center;
-        }
-        .loading-overlay.active {
-            display: flex;
-        }
-        .loading-spinner {
-            width: 60px;
-            height: 60px;
-            border: 8px solid rgba(255, 255, 255, 0.2);
-            border-top: 8px solid #ff6e7f;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
         }
         .mismatch-table th {
             cursor: pointer;
@@ -1069,9 +1249,6 @@ app.get('/', (req, res) => {
     </style>
 </head>
 <body class="min-h-screen font-sans">
-    <div class="loading-overlay" id="loadingOverlay">
-        <div class="loading-spinner"></div>
-    </div>
     <div class="container mx-auto px-4 py-8">
         <div class="relative bg-gray-800 rounded-2xl shadow-lg p-8 mb-8 gradient-bg text-white fade-in">
             <h1 class="text-4xl font-extrabold tracking-tight">Shopify Sync Dashboard</h1>
@@ -1153,7 +1330,7 @@ app.get('/', (req, res) => {
                                 class="${systemPaused ? 'bg-green-500 hover:bg-green-600' : 'bg-red-500 hover:bg-red-600'} text-white px-4 py-2 rounded-lg btn-hover">
                             ${systemPaused ? 'Resume System' : 'Pause System'}
                         </button>
-                        <div id="pauseSpinner" class="spinner"></div>
+                        <div id="pauseSpinner" class="spinner hidden"></div>
                     </div>
                 </div>
             </div>
@@ -1161,24 +1338,24 @@ app.get('/', (req, res) => {
             <div class="flex flex-wrap gap-4">
                 <div class="flex items-center">
                     <button onclick="triggerSync('products')" class="bg-blue-500 text-white px-6 py-3 rounded-lg btn-hover">Create New Products</button>
-                    <div id="productsSpinner" class="spinner"></div>
+                    <div id="productsSpinner" class="spinner hidden"></div>
                 </div>
                 <div class="flex items-center">
                     <button onclick="triggerSync('inventory')" class="bg-green-500 text-white px-6 py-3 rounded-lg btn-hover">Update Inventory</button>
-                    <div id="inventorySpinner" class="spinner"></div>
+                    <div id="inventorySpinner" class="spinner hidden"></div>
                 </div>
                 <div class="flex items-center">
                     <button onclick="triggerSync('discontinued')" class="bg-orange-500 text-white px-6 py-3 rounded-lg btn-hover">Check Discontinued</button>
-                    <div id="discontinuedSpinner" class="spinner"></div>
+                    <div id="discontinuedSpinner" class="spinner hidden"></div>
                 </div>
                 <div class="flex items-center">
                     <button onclick="fixInventoryTracking()" class="bg-purple-500 text-white px-6 py-3 rounded-lg btn-hover">Fix Inventory Tracking</button>
-                    <div id="fixSpinner" class="spinner"></div>
+                    <div id="fixSpinner" class="spinner hidden"></div>
                 </div>
                 ${mismatches.length > 0 ? `
                 <div class="flex items-center">
                     <button onclick="triggerSync('mismatches')" class="bg-yellow-500 text-white px-6 py-3 rounded-lg btn-hover">Create from Mismatches</button>
-                    <div id="mismatchesSpinner" class="spinner"></div>
+                    <div id="mismatchesSpinner" class="spinner hidden"></div>
                 </div>
                 ` : ''}
             </div>
@@ -1189,7 +1366,9 @@ app.get('/', (req, res) => {
                     <li>• Auto-pauses if Apify/Shopify fetch fails</li>
                     <li>• Prevents large unexpected changes (>30%)</li>
                     <li>• Stops if error rate exceeds 20%</li>
-                    <li>• Limits bulk discontinuations (max 100)</li>
+                    <li>• Limits bulk discontinuations (max 50)</li>
+                    <li>• Initial setup allows up to 500 products per batch</li>
+                    ${TELEGRAM_CONFIG.enabled ? '<li>• <span class="text-green-400">✓ Telegram notifications active</span></li>' : '<li>• <span class="text-yellow-400">⚠ Telegram not configured</span></li>'}
                 </ul>
             </div>
         </div>
@@ -1243,7 +1422,7 @@ app.get('/', (req, res) => {
             const spinner = document.getElementById('pauseSpinner');
             
             button.disabled = true;
-            spinner.style.display = 'inline-block';
+            spinner.classList.remove('hidden');
             
             try {
                 const response = await fetch('/api/pause', { method: 'POST' });
@@ -1261,7 +1440,7 @@ app.get('/', (req, res) => {
                 addLogEntry('❌ Failed to toggle pause', 'error');
             } finally {
                 button.disabled = false;
-                spinner.style.display = 'none';
+                spinner.classList.add('hidden');
             }
         }
         
@@ -1308,15 +1487,13 @@ app.get('/', (req, res) => {
         async function fixInventoryTracking() {
             const button = event.target;
             const spinner = document.getElementById('fixSpinner');
-            const overlay = document.getElementById('loadingOverlay');
             
             if (!confirm('This will enable inventory tracking for all products that don\\'t have it. Continue?')) {
                 return;
             }
             
             button.disabled = true;
-            spinner.style.display = 'inline-block';
-            overlay.classList.add('active');
+            spinner.classList.remove('hidden');
             
             try {
                 const response = await fetch('/api/fix/inventory-tracking', { method: 'POST' });
@@ -1333,19 +1510,16 @@ app.get('/', (req, res) => {
                 addLogEntry('❌ Failed to fix inventory tracking', 'error');
             } finally {
                 button.disabled = false;
-                spinner.style.display = 'none';
-                overlay.classList.remove('active');
+                spinner.classList.add('hidden');
             }
         }
         
         async function triggerSync(type) {
             const button = event.target;
             const spinner = document.getElementById(type + 'Spinner');
-            const overlay = document.getElementById('loadingOverlay');
             
             button.disabled = true;
-            spinner.style.display = 'inline-block';
-            overlay.classList.add('active');
+            spinner.classList.remove('hidden');
             
             try {
                 const response = await fetch('/api/sync/' + type, { method: 'POST' });
@@ -1353,7 +1527,9 @@ app.get('/', (req, res) => {
                 
                 if (result.success) {
                     addLogEntry('✅ ' + result.message, 'success');
-                    setTimeout(() => location.reload(), 2000);
+                    if (result.data) {
+                        updateStats();
+                    }
                 } else {
                     addLogEntry('❌ ' + (result.message || 'Sync failed'), 'error');
                 }
@@ -1362,8 +1538,7 @@ app.get('/', (req, res) => {
                 addLogEntry('❌ Failed to trigger ' + type + ' sync', 'error');
             } finally {
                 button.disabled = false;
-                spinner.style.display = 'none';
-                overlay.classList.remove('active');
+                spinner.classList.add('hidden');
             }
         }
         
@@ -1398,8 +1573,7 @@ app.get('/', (req, res) => {
             rows.forEach(row => table.appendChild(row));
         }
         
-        // Auto-refresh stats every 30 seconds
-        setInterval(async () => {
+        async function updateStats() {
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
@@ -1416,14 +1590,17 @@ app.get('/', (req, res) => {
             } catch (error) {
                 console.error('Status update error:', error);
             }
-        }, 30000);
+        }
+        
+        // Auto-refresh stats every 30 seconds
+        setInterval(updateStats, 30000);
     </script>
 </body>
 </html>
   `);
 });
 
-// API endpoints
+// Continue with remaining API endpoints...
 app.get('/api/status', (req, res) => {
   res.json({
     ...stats,
@@ -1434,6 +1611,7 @@ app.get('/api/status', (req, res) => {
     mismatches: mismatches.slice(0, 20),
     uptime: process.uptime(),
     lastKnownGoodState,
+    telegramEnabled: TELEGRAM_CONFIG.enabled,
     environment: {
       apifyToken: config.apify.token ? 'SET' : 'MISSING',
       shopifyToken: config.shopify.accessToken ? 'SET' : 'MISSING',
@@ -1446,6 +1624,7 @@ app.post('/api/failsafe/clear', (req, res) => {
   failsafeTriggered = false;
   failsafeReason = '';
   addLog('Failsafe cleared manually', 'info');
+  sendTelegramNotification('✅ Failsafe has been cleared manually. System can resume operations.');
   res.json({ success: true });
 });
 
@@ -1471,207 +1650,25 @@ app.get('/api/locations', async (req, res) => {
   }
 });
 
-app.post('/api/pause', (req, res) => {
-  systemPaused = !systemPaused;
-  addLog(`System ${systemPaused ? 'paused' : 'resumed'}`, 'info');
-  res.json({ success: true, paused: systemPaused });
-});
-
-app.post('/api/sync/products', async (req, res) => {
+app.get('/api/diagnose-handles', async (req, res) => {
   try {
-    addLog('Manual product sync triggered', 'info');
+    addLog('Running handle diagnostic...', 'info');
+    
     const apifyData = await getApifyProducts();
-    const processedProducts = processApifyProducts(apifyData, { processPrice: true });
     const shopifyData = await getShopifyProducts();
-    const shopifyHandles = new Set(shopifyData.map(p => p.handle.toLowerCase()));
-    const newProducts = processedProducts.filter(p => !shopifyHandles.has(p.handle.toLowerCase()));
-    const result = await createNewProducts(newProducts);
-    res.json({ success: true, message: `Created ${result.created} products`, data: result });
-  } catch (error) {
-    addLog(`Product sync failed: ${error.message}`, 'error');
-    stats.errors++;
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.post('/api/sync/inventory', async (req, res) => {
-  try {
-    addLog('Manual inventory sync triggered', 'info');
-    const result = await updateInventory();
     
-    if (mismatches.length > 100) {
-      addLog(`Note: ${mismatches.length} Apify products don't exist in Shopify. Consider running "Create New Products" to add them.`, 'warning');
-    }
+    const apifySample = apifyData.slice(0, 20);
+    const shopifySample = shopifyData.filter(p => p.tags && p.tags.includes('Supplier:Apify')).slice(0, 20);
     
-    res.json({ 
-      success: true, 
-      message: `Updated ${result.updated} products`, 
-      data: {
-        ...result,
-        mismatches: mismatches.length,
-        suggestion: mismatches.length > 100 ? 'Consider running "Create New Products" to add missing products' : null
-      }
-    });
-  } catch (error) {
-    addLog(`Inventory sync failed: ${error.message}`, 'error');
-    stats.errors++;
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.post('/api/sync/discontinued', async (req, res) => {
-  try {
-    addLog('Manual discontinued check triggered', 'info');
-    const result = await handleDiscontinuedProducts();
-    res.json({ success: true, message: `Discontinued ${result.discontinued} products`, data: result });
-  } catch (error) {
-    addLog(`Discontinued check failed: ${error.message}`, 'error');
-    stats.errors++;
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.post('/api/sync/mismatches', async (req, res) => {
-  try {
-    addLog('Creating products from mismatches...', 'info');
+    const processedApify = processApifyProducts(apifySample, { processPrice: false });
     
-    const [apifyData, shopifyData] = await Promise.all([
-      getApifyProducts(),
-      getShopifyProducts()
-    ]);
-    
-    const processedProducts = processApifyProducts(apifyData, { processPrice: true });
-    const shopifyHandles = new Set(shopifyData.map(p => p.handle.toLowerCase()));
-    
-    const newProducts = processedProducts.filter(p => !shopifyHandles.has(p.handle.toLowerCase()));
-    
-    addLog(`Found ${newProducts.length} products to create from mismatches`, 'info');
-    
-    const productsToCreate = newProducts.slice(0, 50);
-    
-    if (productsToCreate.length === 0) {
-      return res.json({ 
-        success: true, 
-        message: 'No new products to create', 
-        data: { created: 0, errors: 0, total: 0 }
-      });
-    }
-    
-    const result = await createNewProducts(productsToCreate);
-    
-    res.json({ 
-      success: true, 
-      message: `Created ${result.created} products from mismatches`, 
-      data: {
-        ...result,
-        remaining: newProducts.length - productsToCreate.length
-      }
-    });
-  } catch (error) {
-    addLog(`Mismatch sync failed: ${error.message}`, 'error');
-    stats.errors++;
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.post('/api/fix/inventory-tracking', async (req, res) => {
-  try {
-    addLog('Starting inventory tracking fix for all products...', 'info');
-    
-    const shopifyData = await getShopifyProducts();
-    let fixed = 0;
-    let errors = 0;
-    
-    for (const product of shopifyData) {
-      if (!product.variants || !product.variants[0]) continue;
+    const comparison = processedApify.map(apify => {
+      const shopifyMatch = shopifySample.find(s => 
+        s.handle.toLowerCase() === apify.handle.toLowerCase() ||
+        s.title.toLowerCase().includes(apify.title.toLowerCase().substring(0, 20))
+      );
       
-      const variant = product.variants[0];
-      
-      if (!variant.inventory_management || variant.inventory_management === 'blank') {
-        try {
-          addLog(`Fixing inventory tracking for: ${product.title}`, 'info');
-          
-          const updateData = {
-            variant: {
-              id: variant.id,
-              inventory_management: 'shopify',
-              inventory_policy: 'deny'
-            }
-          };
-          
-          await shopifyClient.put(`/variants/${variant.id}.json`, updateData);
-          
-          if (variant.inventory_item_id) {
-            await shopifyClient.post('/inventory_levels/connect.json', {
-              location_id: parseInt(config.shopify.locationId),
-              inventory_item_id: variant.inventory_item_id
-            }).catch(() => {});
-          }
-          
-          fixed++;
-          await new Promise(resolve => setTimeout(resolve, 500));
-        } catch (error) {
-          errors++;
-          addLog(`Failed to fix ${product.title}: ${error.message}`, 'error');
-        }
-      }
-    }
-    
-    addLog(`Inventory tracking fix complete: ${fixed} fixed, ${errors} errors`, 'success');
-    
-    res.json({
-      success: true,
-      message: `Fixed inventory tracking for ${fixed} products`,
-      data: { fixed, errors, total: shopifyData.length }
-    });
-  } catch (error) {
-    addLog(`Inventory tracking fix failed: ${error.message}`, 'error');
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Scheduled jobs with failsafe
-cron.schedule('*/30 * * * *', async () => {
-  if (systemPaused || failsafeTriggered) {
-    addLog(`Scheduled inventory update skipped - system ${systemPaused ? 'paused' : 'failsafe triggered'}`, 'warning');
-    return;
-  }
-  addLog('Starting scheduled inventory update', 'info');
-  try { await updateInventory(); } catch (error) { 
-    addLog(`Scheduled inventory update failed: ${error.message}`, 'error'); 
-    stats.errors++; 
-  }
-});
-
-cron.schedule('0 */6 * * *', async () => {
-  if (systemPaused || failsafeTriggered) {
-    addLog(`Scheduled product creation skipped - system ${systemPaused ? 'paused' : 'failsafe triggered'}`, 'warning');
-    return;
-  }
-  addLog('Starting scheduled product creation', 'info');
-  try { 
-    const apifyData = await getApifyProducts();
-    const processedProducts = processApifyProducts(apifyData, { processPrice: true });
-    const shopifyData = await getShopifyProducts();
-    const shopifyHandles = new Set(shopifyData.map(p => p.handle.toLowerCase()));
-    const newProducts = processedProducts.filter(p => !shopifyHandles.has(p.handle.toLowerCase()));
-    await createNewProducts(newProducts);
-    await handleDiscontinuedProducts();
-  } catch (error) { 
-    addLog(`Scheduled product creation failed: ${error.message}`, 'error'); 
-    stats.errors++; 
-  }
-});
-
-app.listen(PORT, () => {
-  const requiredEnv = ['APIFY_TOKEN', 'SHOPIFY_ACCESS_TOKEN', 'SHOPIFY_DOMAIN'];
-  const missing = requiredEnv.filter(key => !process.env[key]);
-  if (missing.length > 0) {
-    addLog(`FATAL: Missing environment variables: ${missing.join(', ')}`, 'error');
-    process.exit(1);
-  }
-  addLog(`Shopify Sync Service started on port ${PORT}`, 'success');
-  addLog('Inventory updates: Every 30 minutes', 'info');
-  addLog('Product creation: Every 6 hours', 'info');
-  addLog('Failsafe protection: ACTIVE', 'info');
-});
+      return {
+        apifyTitle: apify.title,
+        apifyHandle: apify.handle,
+        shopifyTitle: shopifyMatch?.title || 'NOT
