@@ -17,13 +17,13 @@ let failsafeReason = '';
 
 // Failsafe configuration
 const FAILSAFE_LIMITS = {
-  MIN_APIFY_PRODUCTS: 100, // Minimum expected Apify products
-  MIN_SHOPIFY_PRODUCTS: 100, // Minimum expected Shopify products
-  MAX_CHANGE_PERCENTAGE: 30, // Maximum % of products that can change in one sync
-  MAX_ERROR_RATE: 20, // Maximum error rate percentage
-  MAX_DISCONTINUED_AT_ONCE: 100, // Maximum products to discontinue in one run
-  MAX_PRICE_CHANGES: 50, // Maximum price changes in one run
-  FETCH_TIMEOUT: 300000 // 5 minutes timeout for fetches
+  MIN_APIFY_PRODUCTS: 100,
+  MIN_SHOPIFY_PRODUCTS: 100,
+  MAX_CHANGE_PERCENTAGE: 30,
+  MAX_ERROR_RATE: 20,
+  MAX_DISCONTINUED_AT_ONCE: 100,
+  MAX_PRICE_CHANGES: 50,
+  FETCH_TIMEOUT: 300000
 };
 
 // Track last known good state
@@ -52,7 +52,6 @@ function checkFailsafeConditions(context, data = {}) {
       if (data.shopifyCount < FAILSAFE_LIMITS.MIN_SHOPIFY_PRODUCTS) {
         checks.push(`Shopify products too low: ${data.shopifyCount} < ${FAILSAFE_LIMITS.MIN_SHOPIFY_PRODUCTS}`);
       }
-      // Check for dramatic changes from last known good state
       if (lastKnownGoodState.apifyCount > 0) {
         const changePercent = Math.abs((data.apifyCount - lastKnownGoodState.apifyCount) / lastKnownGoodState.apifyCount * 100);
         if (changePercent > FAILSAFE_LIMITS.MAX_CHANGE_PERCENTAGE) {
@@ -154,7 +153,6 @@ async function getApifyProducts() {
     addLog(`Apify fetch error: ${error.message}`, 'error');
     stats.errors++;
     
-    // Trigger failsafe on fetch error
     failsafeTriggered = true;
     failsafeReason = `Apify fetch failed: ${error.message}`;
     systemPaused = true;
@@ -164,7 +162,6 @@ async function getApifyProducts() {
   
   addLog(`Apify fetch complete: ${allItems.length} total products`, 'info');
   
-  // Check failsafe conditions
   if (!checkFailsafeConditions('fetch', { apifyCount: allItems.length })) {
     throw new Error('Failsafe triggered: Apify product count anomaly');
   }
@@ -201,7 +198,6 @@ async function getShopifyProducts() {
     addLog(`Shopify fetch error: ${error.message}`, 'error');
     stats.errors++;
     
-    // Trigger failsafe on fetch error
     failsafeTriggered = true;
     failsafeReason = `Shopify fetch failed: ${error.message}`;
     systemPaused = true;
@@ -212,7 +208,6 @@ async function getShopifyProducts() {
   const filteredProducts = allProducts.filter(p => p.tags && p.tags.includes('Supplier:Apify'));
   addLog(`Shopify fetch complete: ${allProducts.length} total products, ${filteredProducts.length} with Supplier:Apify tag`, 'info');
   
-  // Check failsafe conditions
   if (!checkFailsafeConditions('fetch', { shopifyCount: filteredProducts.length })) {
     throw new Error('Failsafe triggered: Shopify product count anomaly');
   }
@@ -431,13 +426,31 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
   }).filter(Boolean);
 }
 
+async function enableInventoryTracking(productId, variantId, inventoryItemId) {
+  try {
+    const updateData = {
+      variant: {
+        id: variantId,
+        inventory_management: 'shopify',
+        inventory_policy: 'deny'
+      }
+    };
+    
+    await shopifyClient.put(`/variants/${variantId}.json`, updateData);
+    addLog(`Enabled inventory tracking for variant ${variantId}`, 'success');
+    return true;
+  } catch (error) {
+    addLog(`Failed to enable inventory tracking for variant ${variantId}: ${error.message}`, 'error');
+    return false;
+  }
+}
+
 async function createNewProducts(productsToCreate) {
   if (systemPaused) {
     addLog('Product creation skipped - system is paused', 'warning');
     return { created: 0, errors: 0, total: productsToCreate.length };
   }
 
-  // Failsafe check
   const shopifyData = await getShopifyProducts();
   if (!checkFailsafeConditions('products', { 
     toCreate: productsToCreate.length, 
@@ -466,13 +479,16 @@ async function createNewProducts(productsToCreate) {
             compare_at_price: product.compareAtPrice,
             sku: product.sku,
             inventory_management: 'shopify',
-            inventory_policy: 'deny'
+            inventory_policy: 'deny',
+            inventory_quantity: product.inventory,
+            fulfillment_service: 'manual',
+            requires_shipping: true
           }]
         };
 
         const response = await shopifyClient.post('/products.json', { product: shopifyProduct });
         const createdProduct = response.data.product;
-        addLog(`Created: ${product.title} (£${product.price})`, 'success');
+        addLog(`Created: ${product.title} (£${product.price}) with inventory tracking enabled`, 'success');
 
         for (const imageUrl of product.images) {
           try {
@@ -483,12 +499,22 @@ async function createNewProducts(productsToCreate) {
           }
         }
 
-        if (createdProduct.variants && createdProduct.variants[0]) {
-          await shopifyClient.post('/inventory_levels/set.json', {
-            location_id: config.shopify.locationId,
-            inventory_item_id: createdProduct.variants[0].inventory_item_id,
-            available: product.inventory
-          });
+        if (createdProduct.variants && createdProduct.variants[0] && createdProduct.variants[0].inventory_item_id) {
+          try {
+            await shopifyClient.post('/inventory_levels/connect.json', {
+              location_id: parseInt(config.shopify.locationId),
+              inventory_item_id: createdProduct.variants[0].inventory_item_id
+            }).catch(() => {});
+            
+            await shopifyClient.post('/inventory_levels/set.json', {
+              location_id: parseInt(config.shopify.locationId),
+              inventory_item_id: createdProduct.variants[0].inventory_item_id,
+              available: product.inventory
+            });
+            addLog(`Set inventory for ${product.title}: ${product.inventory} units`, 'info');
+          } catch (invError) {
+            addLog(`Inventory set failed for ${product.title}: ${invError.message}`, 'warning');
+          }
         }
 
         created++;
@@ -532,7 +558,6 @@ async function handleDiscontinuedProducts() {
     
     addLog(`Found ${discontinuedProducts.length} potentially discontinued products`, 'info');
     
-    // Failsafe check
     if (!checkFailsafeConditions('discontinued', { toDiscontinue: discontinuedProducts.length })) {
       return { discontinued: 0, errors: 0, total: discontinuedProducts.length };
     }
@@ -578,13 +603,13 @@ async function updateInventory() {
     return { updated: 0, created: 0, errors: 0, total: 0 };
   }
 
-  let updated = 0, errors = 0;
+  let updated = 0, errors = 0, trackingEnabled = 0;
   mismatches = [];
+  
   try {
     addLog('=== STARTING INVENTORY UPDATE WORKFLOW ===', 'info');
     const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]);
     
-    // Update last known good state if fetch was successful
     if (apifyData.length > FAILSAFE_LIMITS.MIN_APIFY_PRODUCTS && 
         shopifyData.length > FAILSAFE_LIMITS.MIN_SHOPIFY_PRODUCTS) {
       lastKnownGoodState = {
@@ -741,7 +766,8 @@ async function updateInventory() {
         newInventory: targetInventory,
         inventoryItemId: shopifyProduct.variants[0].inventory_item_id,
         matchType,
-        productId: shopifyProduct.id
+        productId: shopifyProduct.id,
+        variantId: shopifyProduct.variants[0].id
       });
       
       if (inventoryUpdates.length <= 5) {
@@ -767,7 +793,6 @@ async function updateInventory() {
     addLog(`Updates needed: ${inventoryUpdates.length}`, 'info');
     addLog(`Mismatches: ${processedProducts.length - matchedCount}`, 'warning');
 
-    // Failsafe check before updating
     const errorRate = errors > 0 ? (errors / inventoryUpdates.length * 100) : 0;
     if (!checkFailsafeConditions('inventory', {
       updatesNeeded: inventoryUpdates.length,
@@ -784,6 +809,22 @@ async function updateInventory() {
 
     for (const update of inventoryUpdates) {
       try {
+        const variantResponse = await shopifyClient.get(`/products/${update.productId}.json?fields=variants`);
+        const variant = variantResponse.data.product.variants[0];
+        
+        if (!variant.inventory_management || variant.inventory_management === 'blank') {
+          addLog(`Enabling inventory tracking for: ${update.title}`, 'info');
+          const enabled = await enableInventoryTracking(update.productId, variant.id, update.inventoryItemId);
+          
+          if (!enabled) {
+            errors++;
+            stats.errors++;
+            continue;
+          }
+          trackingEnabled++;
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        
         const checkResponse = await shopifyClient.get(
           `/inventory_levels.json?inventory_item_ids=${update.inventoryItemId}&location_ids=${config.shopify.locationId}`
         ).catch(err => null);
@@ -797,7 +838,7 @@ async function updateInventory() {
             addLog(`Connected inventory item to location for: ${update.title}`, 'info');
             await new Promise(resolve => setTimeout(resolve, 250));
           } catch (connectErr) {
-            // Item might already be connected
+            // Already connected
           }
         }
         
@@ -815,7 +856,31 @@ async function updateInventory() {
         errors++;
         stats.errors++;
         
-        if (error.response) {
+        if (error.response?.data?.errors?.[0]?.includes('inventory tracking')) {
+          addLog(`✗ ${update.title} - Inventory tracking not enabled. Attempting to enable...`, 'warning');
+          
+          try {
+            const productResponse = await shopifyClient.get(`/products/${update.productId}.json`);
+            const product = productResponse.data.product;
+            if (product.variants && product.variants[0]) {
+              await enableInventoryTracking(product.id, product.variants[0].id, product.variants[0].inventory_item_id);
+              trackingEnabled++;
+              
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              await shopifyClient.post('/inventory_levels/set.json', {
+                location_id: parseInt(config.shopify.locationId),
+                inventory_item_id: update.inventoryItemId,
+                available: update.newInventory
+              });
+              
+              addLog(`✓ Retry successful: ${update.title} (${update.currentInventory} → ${update.newInventory})`, 'success');
+              updated++;
+              errors--;
+            }
+          } catch (retryError) {
+            addLog(`✗ Failed to enable tracking and update: ${update.title} - ${retryError.message}`, 'error');
+          }
+        } else if (error.response) {
           const errorDetails = error.response.data?.errors || error.response.data?.error || error.message;
           addLog(`✗ Failed: ${update.title} - Status ${error.response.status}: ${JSON.stringify(errorDetails)}`, 'error');
           
@@ -837,16 +902,15 @@ async function updateInventory() {
 
     stats.lastSync = new Date().toISOString();
     addLog(`=== INVENTORY UPDATE COMPLETE ===`, 'info');
-    addLog(`Result: ${updated} updated, ${errors} errors out of ${inventoryUpdates.length} attempts`, updated > 0 ? 'success' : 'info');
+    addLog(`Result: ${updated} updated, ${trackingEnabled} tracking enabled, ${errors} errors out of ${inventoryUpdates.length} attempts`, updated > 0 ? 'success' : 'info');
     
     if (errors > inventoryUpdates.length * 0.5) {
-      addLog('⚠️ High error rate detected. Please verify:', 'warning');
-      addLog(`  - SHOPIFY_LOCATION_ID is correct: ${config.shopify.locationId}`, 'warning');
-      addLog('  - Products have inventory tracking enabled', 'warning');
-      addLog('  - API permissions include inventory management', 'warning');
+      addLog('⚠️ High error rate detected. Common issues:', 'warning');
+      addLog('  - Products created without inventory tracking enabled', 'warning');
+      addLog('  - Use "Fix Inventory Tracking" button to enable for all products', 'warning');
     }
     
-    return { updated, created: 0, errors, total: inventoryUpdates.length };
+    return { updated, created: 0, errors, total: inventoryUpdates.length, trackingEnabled };
   } catch (error) {
     addLog(`Inventory update workflow failed: ${error.message}`, 'error');
     stats.errors++;
@@ -858,7 +922,7 @@ async function updateInventory() {
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -866,23 +930,7 @@ app.get('/', (req, res) => {
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body {
-            transition: background-color 0.3s, color 0.3s;
-            background: linear-gradient(to bottom right, #ff6e7f, #bfe9ff);
-            animation: gradientShift 15s ease infinite;
-        }
-        .dark body {
             background: linear-gradient(to bottom right, #1a1a2e, #16213e);
-            animation: gradientShiftDark 15s ease infinite;
-        }
-        @keyframes gradientShift {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
-        }
-        @keyframes gradientShiftDark {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
         }
         .gradient-bg {
             background: linear-gradient(135deg, #ff6e7f 0%, #bfe9ff 100%);
@@ -906,13 +954,8 @@ app.get('/', (req, res) => {
         }
         .card-hover {
             transition: all 0.3s ease-in-out;
-            background: rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-        }
-        .dark .card-hover {
             background: rgba(31, 41, 55, 0.2);
+            backdrop-filter: blur(12px);
             border: 1px solid rgba(255, 255, 255, 0.1);
             box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
         }
@@ -947,12 +990,6 @@ app.get('/', (req, res) => {
         .btn-hover:hover {
             transform: scale(1.1);
             box-shadow: 0 0 20px rgba(255, 110, 127, 0.7);
-            animation: glow 1.5s infinite;
-        }
-        @keyframes glow {
-            0% { box-shadow: 0 0 5px rgba(255, 110, 127, 0.7); }
-            50% { box-shadow: 0 0 20px rgba(255, 110, 127, 1); }
-            100% { box-shadow: 0 0 5px rgba(255, 110, 127, 0.7); }
         }
         .fade-in {
             animation: fadeIn 0.6s ease-in-out;
@@ -996,13 +1033,7 @@ app.get('/', (req, res) => {
             border: 8px solid rgba(255, 255, 255, 0.2);
             border-top: 8px solid #ff6e7f;
             border-radius: 50%;
-            animation: spin 1s linear infinite, pulseSpinner 2s infinite;
-            transform-style: preserve-3d;
-        }
-        @keyframes pulseSpinner {
-            0% { transform: scale(1) rotateX(0deg); }
-            50% { transform: scale(1.2) rotateX(10deg); }
-            100% { transform: scale(1) rotateX(0deg); }
+            animation: spin 1s linear infinite;
         }
         .mismatch-table th {
             cursor: pointer;
@@ -1011,36 +1042,21 @@ app.get('/', (req, res) => {
             backdrop-filter: blur(8px);
         }
         .mismatch-table th:hover {
-            background: rgba(255, 110, 127, 0.3);
-            transform: scale(1.02);
-        }
-        .dark .mismatch-table th:hover {
             background: rgba(255, 110, 127, 0.2);
         }
-        .mismatch-table tr {
-            transition: background-color 0.3s;
-        }
         .mismatch-table tr:nth-child(even) {
-            background: rgba(255, 255, 255, 0.05);
-        }
-        .dark .mismatch-table tr:nth-child(even) {
             background: rgba(31, 41, 55, 0.1);
         }
         .mismatch-table tr:hover {
             background: rgba(255, 110, 127, 0.2);
-            transform: scale(1.01);
         }
         .log-container {
-            background: rgba(17, 24, 39, 0.9);
+            background: rgba(17, 24, 39, 0.95);
             backdrop-filter: blur(10px);
             box-shadow: 0 0 30px rgba(0, 0, 0, 0.3);
-            transition: box-shadow 0.3s;
         }
         .log-container:hover {
             box-shadow: 0 0 40px rgba(255, 110, 127, 0.5);
-        }
-        .dark .log-container {
-            background: rgba(17, 24, 39, 0.95);
         }
         .failsafe-alert {
             animation: pulse 2s infinite;
@@ -1052,49 +1068,46 @@ app.get('/', (req, res) => {
         }
     </style>
 </head>
-<body class="min-h-screen font-sans transition-colors">
+<body class="min-h-screen font-sans">
     <div class="loading-overlay" id="loadingOverlay">
         <div class="loading-spinner"></div>
     </div>
     <div class="container mx-auto px-4 py-8">
-        <div class="relative bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-8 mb-8 gradient-bg text-white fade-in">
+        <div class="relative bg-gray-800 rounded-2xl shadow-lg p-8 mb-8 gradient-bg text-white fade-in">
             <h1 class="text-4xl font-extrabold tracking-tight">Shopify Sync Dashboard</h1>
             <p class="mt-2 text-lg opacity-90">Seamless product synchronization with Apify, optimized for SEO</p>
-            <button onclick="toggleDarkMode()" class="absolute top-4 right-4 bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 px-3 py-1 rounded-full text-sm btn-hover">
-                Toggle Dark Mode
-            </button>
         </div>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
             <div class="rounded-2xl p-6 card-hover fade-in">
-                <h3 class="text-lg font-semibold text-blue-500 dark:text-blue-400">New Products</h3>
-                <p class="text-3xl font-bold text-gray-900 dark:text-gray-100" id="newProducts">${stats.newProducts}</p>
+                <h3 class="text-lg font-semibold text-blue-400">New Products</h3>
+                <p class="text-3xl font-bold text-gray-100" id="newProducts">${stats.newProducts}</p>
             </div>
             <div class="rounded-2xl p-6 card-hover fade-in">
-                <h3 class="text-lg font-semibold text-green-500 dark:text-green-400">Inventory Updates</h3>
-                <p class="text-3xl font-bold text-gray-900 dark:text-gray-100" id="inventoryUpdates">${stats.inventoryUpdates}</p>
+                <h3 class="text-lg font-semibold text-green-400">Inventory Updates</h3>
+                <p class="text-3xl font-bold text-gray-100" id="inventoryUpdates">${stats.inventoryUpdates}</p>
             </div>
             <div class="rounded-2xl p-6 card-hover fade-in">
-                <h3 class="text-lg font-semibold text-orange-500 dark:text-orange-400">Discontinued</h3>
-                <p class="text-3xl font-bold text-gray-900 dark:text-gray-100" id="discontinued">${stats.discontinued}</p>
+                <h3 class="text-lg font-semibold text-orange-400">Discontinued</h3>
+                <p class="text-3xl font-bold text-gray-100" id="discontinued">${stats.discontinued}</p>
             </div>
             <div class="rounded-2xl p-6 card-hover fade-in">
-                <h3 class="text-lg font-semibold text-red-500 dark:text-red-400">Errors</h3>
-                <p class="text-3xl font-bold text-gray-900 dark:text-gray-100" id="errors">${stats.errors}</p>
+                <h3 class="text-lg font-semibold text-red-400">Errors</h3>
+                <p class="text-3xl font-bold text-gray-100" id="errors">${stats.errors}</p>
             </div>
         </div>
 
         <div class="rounded-2xl p-6 card-hover mb-8 fade-in">
-            <h2 class="text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-4">System Controls</h2>
+            <h2 class="text-2xl font-semibold text-gray-100 mb-4">System Controls</h2>
             
             ${failsafeTriggered ? `
-            <div class="mb-4 p-4 rounded-lg bg-red-100 dark:bg-red-900 border-2 border-red-500 failsafe-alert">
+            <div class="mb-4 p-4 rounded-lg bg-red-900 border-2 border-red-500 failsafe-alert">
                 <div class="flex items-center justify-between">
                     <div>
-                        <h3 class="font-bold text-red-800 dark:text-red-300">
+                        <h3 class="font-bold text-red-300">
                             🚨 FAILSAFE TRIGGERED
                         </h3>
-                        <p class="text-sm text-red-600 dark:text-red-400">
+                        <p class="text-sm text-red-400">
                             ${failsafeReason}
                         </p>
                     </div>
@@ -1107,13 +1120,13 @@ app.get('/', (req, res) => {
             ` : ''}
             
             ${mismatches.length > 100 ? `
-            <div class="mb-4 p-4 rounded-lg bg-yellow-100 dark:bg-yellow-900 border border-yellow-300 dark:border-yellow-700">
+            <div class="mb-4 p-4 rounded-lg bg-yellow-900 border border-yellow-700">
                 <div class="flex items-center justify-between">
                     <div>
-                        <h3 class="font-medium text-yellow-800 dark:text-yellow-300">
+                        <h3 class="font-medium text-yellow-300">
                             ⚠️ ${mismatches.length} Unmatched Products
                         </h3>
-                        <p class="text-sm text-yellow-600 dark:text-yellow-400">
+                        <p class="text-sm text-yellow-400">
                             These Apify products don't exist in Shopify yet. Create them to sync inventory.
                         </p>
                     </div>
@@ -1125,13 +1138,13 @@ app.get('/', (req, res) => {
             </div>
             ` : ''}
             
-            <div class="mb-6 p-4 rounded-lg ${systemPaused ? 'bg-red-100 dark:bg-red-900 border-red-300 dark:border-red-700' : 'bg-green-100 dark:bg-green-900 border-green-300 dark:border-green-700'} border">
+            <div class="mb-6 p-4 rounded-lg ${systemPaused ? 'bg-red-900 border-red-700' : 'bg-green-900 border-green-700'} border">
                 <div class="flex items-center justify-between">
                     <div>
-                        <h3 class="font-medium ${systemPaused ? 'text-red-800 dark:text-red-300' : 'text-green-800 dark:text-green-300'}" id="systemStatus">
+                        <h3 class="font-medium ${systemPaused ? 'text-red-300' : 'text-green-300'}" id="systemStatus">
                             System Status: ${systemPaused ? 'PAUSED' : 'ACTIVE'}
                         </h3>
-                        <p class="text-sm ${systemPaused ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}" id="systemStatusDesc">
+                        <p class="text-sm ${systemPaused ? 'text-red-400' : 'text-green-400'}" id="systemStatusDesc">
                             ${systemPaused ? 'Automatic syncing is disabled' : 'Automatic syncing every 30min (inventory) & 6hrs (products)'}
                         </p>
                     </div>
@@ -1158,6 +1171,10 @@ app.get('/', (req, res) => {
                     <button onclick="triggerSync('discontinued')" class="bg-orange-500 text-white px-6 py-3 rounded-lg btn-hover">Check Discontinued</button>
                     <div id="discontinuedSpinner" class="spinner"></div>
                 </div>
+                <div class="flex items-center">
+                    <button onclick="fixInventoryTracking()" class="bg-purple-500 text-white px-6 py-3 rounded-lg btn-hover">Fix Inventory Tracking</button>
+                    <div id="fixSpinner" class="spinner"></div>
+                </div>
                 ${mismatches.length > 0 ? `
                 <div class="flex items-center">
                     <button onclick="triggerSync('mismatches')" class="bg-yellow-500 text-white px-6 py-3 rounded-lg btn-hover">Create from Mismatches</button>
@@ -1166,9 +1183,9 @@ app.get('/', (req, res) => {
                 ` : ''}
             </div>
             
-            <div class="mt-4 p-4 rounded-lg bg-gray-100 dark:bg-gray-700">
-                <p class="text-sm text-gray-600 dark:text-gray-400"><strong>Failsafe Protection Active:</strong></p>
-                <ul class="text-xs text-gray-500 dark:text-gray-400 mt-2">
+            <div class="mt-4 p-4 rounded-lg bg-gray-700">
+                <p class="text-sm text-gray-400"><strong>Failsafe Protection Active:</strong></p>
+                <ul class="text-xs text-gray-400 mt-2">
                     <li>• Auto-pauses if Apify/Shopify fetch fails</li>
                     <li>• Prevents large unexpected changes (>30%)</li>
                     <li>• Stops if error rate exceeds 20%</li>
@@ -1178,10 +1195,10 @@ app.get('/', (req, res) => {
         </div>
 
         <div class="rounded-2xl p-6 card-hover mb-8 fade-in">
-            <h2 class="text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-4">Mismatch Report</h2>
+            <h2 class="text-2xl font-semibold text-gray-100 mb-4">Mismatch Report</h2>
             <div class="overflow-x-auto">
-                <table class="mismatch-table w-full text-sm text-left text-gray-500 dark:text-gray-400">
-                    <thead class="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-700 dark:text-gray-400">
+                <table class="mismatch-table w-full text-sm text-left text-gray-400">
+                    <thead class="text-xs text-gray-400 uppercase bg-gray-700">
                         <tr>
                             <th class="px-4 py-2" onclick="sortTable(0)">Apify Title</th>
                             <th class="px-4 py-2" onclick="sortTable(1)">Apify Handle</th>
@@ -1191,7 +1208,7 @@ app.get('/', (req, res) => {
                     </thead>
                     <tbody>
                         ${mismatches.slice(0, 20).map(mismatch => `
-                            <tr class="border-b dark:border-gray-700">
+                            <tr class="border-b border-gray-700">
                                 <td class="px-4 py-2">${mismatch.apifyTitle || ''}</td>
                                 <td class="px-4 py-2">${mismatch.apifyHandle || ''}</td>
                                 <td class="px-4 py-2">${mismatch.apifyUrl || ''}</td>
@@ -1204,7 +1221,7 @@ app.get('/', (req, res) => {
         </div>
 
         <div class="rounded-2xl p-6 card-hover fade-in log-container">
-            <h2 class="text-2xl font-semibold text-gray-900 dark:text-gray-100 mb-4">Activity Log</h2>
+            <h2 class="text-2xl font-semibold text-gray-100 mb-4">Activity Log</h2>
             <div class="bg-gray-900 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm" id="logContainer">
                 ${logs.map(log => 
                     `<div class="${
@@ -1220,15 +1237,6 @@ app.get('/', (req, res) => {
 
     <script>
         let systemPaused = ${systemPaused};
-        
-        function toggleDarkMode() {
-            document.documentElement.classList.toggle('dark');
-            localStorage.setItem('darkMode', document.documentElement.classList.contains('dark'));
-        }
-        
-        if (localStorage.getItem('darkMode') === 'true') {
-            document.documentElement.classList.add('dark');
-        }
         
         async function togglePause() {
             const button = document.getElementById('pauseButton');
@@ -1265,20 +1273,20 @@ app.get('/', (req, res) => {
             
             if (systemPaused) {
                 statusEl.textContent = 'System Status: PAUSED';
-                statusEl.className = 'font-medium text-red-800 dark:text-red-300';
+                statusEl.className = 'font-medium text-red-300';
                 statusDescEl.textContent = 'Automatic syncing is disabled';
-                statusDescEl.className = 'text-sm text-red-600 dark:text-red-400';
+                statusDescEl.className = 'text-sm text-red-400';
                 buttonEl.textContent = 'Resume System';
                 buttonEl.className = 'bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg btn-hover';
-                containerEl.className = 'mb-6 p-4 rounded-lg bg-red-100 dark:bg-red-900 border-red-300 dark:border-red-700 border';
+                containerEl.className = 'mb-6 p-4 rounded-lg bg-red-900 border-red-700 border';
             } else {
                 statusEl.textContent = 'System Status: ACTIVE';
-                statusEl.className = 'font-medium text-green-800 dark:text-green-300';
+                statusEl.className = 'font-medium text-green-300';
                 statusDescEl.textContent = 'Automatic syncing every 30min (inventory) & 6hrs (products)';
-                statusDescEl.className = 'text-sm text-green-600 dark:text-green-400';
+                statusDescEl.className = 'text-sm text-green-400';
                 buttonEl.textContent = 'Pause System';
                 buttonEl.className = 'bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg btn-hover';
-                containerEl.className = 'mb-6 p-4 rounded-lg bg-green-100 dark:bg-green-900 border-green-300 dark:border-green-700 border';
+                containerEl.className = 'mb-6 p-4 rounded-lg bg-green-900 border-green-700 border';
             }
         }
         
@@ -1294,6 +1302,39 @@ app.get('/', (req, res) => {
             } catch (error) {
                 console.error('Clear failsafe error:', error);
                 addLogEntry('❌ Failed to clear failsafe', 'error');
+            }
+        }
+        
+        async function fixInventoryTracking() {
+            const button = event.target;
+            const spinner = document.getElementById('fixSpinner');
+            const overlay = document.getElementById('loadingOverlay');
+            
+            if (!confirm('This will enable inventory tracking for all products that don\\'t have it. Continue?')) {
+                return;
+            }
+            
+            button.disabled = true;
+            spinner.style.display = 'inline-block';
+            overlay.classList.add('active');
+            
+            try {
+                const response = await fetch('/api/fix/inventory-tracking', { method: 'POST' });
+                const result = await response.json();
+                
+                if (result.success) {
+                    addLogEntry('✅ ' + result.message, 'success');
+                    setTimeout(() => location.reload(), 2000);
+                } else {
+                    addLogEntry('❌ Failed to fix inventory tracking', 'error');
+                }
+            } catch (error) {
+                console.error('Fix error:', error);
+                addLogEntry('❌ Failed to fix inventory tracking', 'error');
+            } finally {
+                button.disabled = false;
+                spinner.style.display = 'none';
+                overlay.classList.remove('active');
             }
         }
         
@@ -1382,6 +1423,7 @@ app.get('/', (req, res) => {
   `);
 });
 
+// API endpoints
 app.get('/api/status', (req, res) => {
   res.json({
     ...stats,
@@ -1528,6 +1570,62 @@ app.post('/api/sync/mismatches', async (req, res) => {
   } catch (error) {
     addLog(`Mismatch sync failed: ${error.message}`, 'error');
     stats.errors++;
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/fix/inventory-tracking', async (req, res) => {
+  try {
+    addLog('Starting inventory tracking fix for all products...', 'info');
+    
+    const shopifyData = await getShopifyProducts();
+    let fixed = 0;
+    let errors = 0;
+    
+    for (const product of shopifyData) {
+      if (!product.variants || !product.variants[0]) continue;
+      
+      const variant = product.variants[0];
+      
+      if (!variant.inventory_management || variant.inventory_management === 'blank') {
+        try {
+          addLog(`Fixing inventory tracking for: ${product.title}`, 'info');
+          
+          const updateData = {
+            variant: {
+              id: variant.id,
+              inventory_management: 'shopify',
+              inventory_policy: 'deny'
+            }
+          };
+          
+          await shopifyClient.put(`/variants/${variant.id}.json`, updateData);
+          
+          if (variant.inventory_item_id) {
+            await shopifyClient.post('/inventory_levels/connect.json', {
+              location_id: parseInt(config.shopify.locationId),
+              inventory_item_id: variant.inventory_item_id
+            }).catch(() => {});
+          }
+          
+          fixed++;
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (error) {
+          errors++;
+          addLog(`Failed to fix ${product.title}: ${error.message}`, 'error');
+        }
+      }
+    }
+    
+    addLog(`Inventory tracking fix complete: ${fixed} fixed, ${errors} errors`, 'success');
+    
+    res.json({
+      success: true,
+      message: `Fixed inventory tracking for ${fixed} products`,
+      data: { fixed, errors, total: shopifyData.length }
+    });
+  } catch (error) {
+    addLog(`Inventory tracking fix failed: ${error.message}`, 'error');
     res.status(500).json({ success: false, error: error.message });
   }
 });
