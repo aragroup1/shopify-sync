@@ -1,14 +1,3 @@
-Absolutely — you’re spot on. The “planned new products” count was still using a simple handle comparison. I’ve updated product creation to use the exact same multi-strategy matching we use in inventory updates (handle, SKU, cleaned title, partial handle), against ALL Shopify products. That should collapse that 6,7k “new” count down to the true gap.
-
-I also kept all the previous improvements: non-blocking UI, immediate pause, global abort on failsafe/pause, robust failsafes, safer discontinued, price fixes, inventory tracking auto-fix, permanent dark mode, and Telegram alerts.
-
-Notes
-- Telegram chat_id set via env is recommended (TELEGRAM_CHAT_ID). I left a fallback to your numeric 1596350649.
-- Consider rotating your bot token if it was shared publicly.
-
-Here’s the full updated script
-
-```javascript
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
@@ -111,7 +100,7 @@ function triggerFailsafe(msg) {
     addLog('System automatically paused to prevent potential damage', 'error');
     if (lastFailsafeNotified !== msg) {
       lastFailsafeNotified = msg;
-      notifyTelegram(`🚨 APIFY (Manchester Wholsale) Failsafe triggered\nReason: ${msg}`);
+      notifyTelegram(`🚨 Failsafe triggered\nReason: ${msg}`);
     }
   }
 }
@@ -192,7 +181,7 @@ function normalizeTitle(text = '') {
   return String(text).toLowerCase()
     .replace(/\b\d{4}\b/g, '')
     .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
-    .replace(/\s*\(.*?\)\s*/g, '')
+    .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 }
@@ -269,7 +258,7 @@ function normalizeHandle(input, index, isTitle = false) {
   if (!isTitle && handle && handle !== 'undefined') {
     handle = handle.replace(config.apify.urlPrefix, '')
       .replace(/\.html$/, '')
-      .replace(/\s*\(.*?\)\s*/g, '')
+      .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
       .replace(/[^a-z0-9-]+/g, '-')
       .replace(/-+/g, '-')
       .replace(/^-|-$/g, '')
@@ -286,7 +275,7 @@ function normalizeHandle(input, index, isTitle = false) {
   handle = String(baseText).toLowerCase()
     .replace(/\b\d{4}\b/g, '')
     .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
-    .replace(/\s*\(.*?\)\s*/g, '')
+    .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
     .replace(/[^a-z0-9-]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
@@ -333,7 +322,7 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
     let cleanTitle = item.title || 'Untitled Product';
     cleanTitle = cleanTitle.replace(/\b\d{4}\b/g, '')
       .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
-      .replace(/\s*\(.*?\)\s*/g, '')
+      .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -1243,11 +1232,3 @@ app.listen(PORT, () => {
   if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) addLog('Telegram notifications: ENABLED', 'info');
   else addLog('Telegram notifications: DISABLED (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)', 'warning');
 });
-```
-
-What changed for product creation
-- Uses the same robust match logic as inventory updates (handle/SKU/clean title/partial-handle) against ALL Shopify products.
-- Only creates if no match found by any strategy.
-- Added MAX_CREATE_PER_RUN cap (default 200) to safely onboard in batches. Set via env MAX_CREATE_PER_RUN.
-
-This should stop the “6711 planned new” problem and align creation with real gaps. Want me to also auto-tag matched existing products with Supplier:Apify so future filtering by tag is consistent?
