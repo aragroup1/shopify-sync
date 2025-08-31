@@ -177,7 +177,7 @@ ${JSON.stringify(contextData, null, 2).substring(0, 1000)}
   
   // Send Telegram notification with decision buttons
   const debugInfo = `
-⚠️ <b>Failsafe Warning - Decision Required</b> ⚠️
+⚠️ <b>APIFY Failsafe Warning - Decision Required</b> ⚠️
 
 <b>Reason:</b>
 ${msg}
