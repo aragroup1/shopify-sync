@@ -1,6 +1,4 @@
-Here's the complete script with the diagnostic endpoint and all fixes:
 
-```javascript
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
