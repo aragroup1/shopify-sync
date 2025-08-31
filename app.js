@@ -39,11 +39,12 @@ const FAILSAFE_LIMITS = {
   FETCH_TIMEOUT: Number(process.env.FETCH_TIMEOUT || 300000) // 5 min
 };
 const DISCONTINUE_MISS_RUNS = Number(process.env.DISCONTINUE_MISS_RUNS || 3);
-const MAX_CREATE_PER_RUN = Number(process.env.MAX_CREATE_PER_RUN || 200); // cap creation per run for safety
+const MAX_CREATE_PER_RUN = Number(process.env.MAX_CREATE_PER_RUN || 200); // safety cap
 
-// Telegram notifications (optional)
+// Telegram (set env TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '1596350649'; // fallback to your numeric chat id
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '1596350649';
+const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
 let lastFailsafeNotified = '';
 
 async function notifyTelegram(text) {
@@ -186,6 +187,31 @@ function normalizeTitle(text = '') {
     .trim();
 }
 
+// Title sanitization: remove parentheses + special characters, Title Case
+const TITLE_SMALL_WORDS = new Set(['and','or','the','for','of','in','on','with','a','an','to','at','by','from']);
+function toTitleCase(str='') {
+  const words = str.split(' ').filter(Boolean);
+  return words.map((w, i) => {
+    const lw = w.toLowerCase();
+    if (i !== 0 && i !== words.length - 1 && TITLE_SMALL_WORDS.has(lw)) return lw;
+    return lw.charAt(0).toUpperCase() + lw.slice(1);
+  }).join(' ');
+}
+function sanitizeProductTitle(raw='') {
+  let t = String(raw);
+  // remove phrases
+  t = t.replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '');
+  // remove any (...) content
+  t = t.replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ');
+  // allow letters, numbers, spaces and hyphens only
+  t = t.replace(/[^a-zA-Z0-9 -]+/g, ' ');
+  // collapse whitespace/hyphens
+  t = t.replace(/[\s-]+/g, ' ').trim();
+  // Title Case
+  t = toTitleCase(t);
+  return t || 'Untitled Product';
+}
+
 async function getApifyProducts() {
   let allItems = [];
   let offset = 0;
@@ -292,24 +318,81 @@ function extractHandleFromCanonicalUrl(item, index) {
   return handle || `product-${index}-${Date.now()}`;
 }
 
+// SEO helpers
+function buildMetaTitle(product) {
+  const base = `${product.title} | LandOfEssentials`;
+  return base.length > 60 ? `${product.title.slice(0, 57)}...` : base;
+}
+function extractFeaturesFromTitle(title = '') {
+  const t = title.toLowerCase();
+  const features = [];
+  if (t.includes('halloween')) features.push('Perfect for Halloween celebrations');
+  if (t.includes('kids') || t.includes('children')) features.push('Designed for children');
+  if (t.includes('game') || t.includes('puzzle')) features.push('Fun and engaging activities');
+  if (t.includes('mask')) features.push('Comfortable and easy to wear');
+  if (t.includes('decoration')) features.push('Enhances any space with festive decor');
+  if (t.includes('toy')) features.push('Safe and durable construction');
+  return features.slice(0, 6);
+}
 function generateSEODescription(product) {
   const title = product.title;
   const originalDescription = product.description || '';
-  const features = [];
-  if (title.toLowerCase().includes('halloween')) features.push('perfect for Halloween celebrations');
-  if (title.toLowerCase().includes('kids') || title.toLowerCase().includes('children')) features.push('designed for children');
-  if (title.toLowerCase().includes('game')) features.push('entertaining and educational');
-  if (title.toLowerCase().includes('mask')) features.push('comfortable and easy to wear');
-  if (title.toLowerCase().includes('decoration')) features.push('enhances any space');
-  if (title.toLowerCase().includes('toy')) features.push('safe and durable construction');
-
+  const features = extractFeaturesFromTitle(title);
   let seo = `${title} - Premium quality ${title.toLowerCase()} available at LandOfEssentials. `;
   if (originalDescription && originalDescription.length > 20) seo += `${originalDescription.substring(0, 150)}... `;
   if (features.length > 0) seo += `This product is ${features.join(', ')}. `;
   seo += `Order now for fast delivery. Shop with confidence at LandOfEssentials - your trusted online retailer for quality products.`;
   return seo;
 }
+function buildProductHtml(product) {
+  const features = extractFeaturesFromTitle(product.title);
+  const featureList = features.length ? `<ul>${features.map(f => `<li>${f}</li>`).join('')}</ul>` : '';
+  return `
+<div>
+  <p>${product.seoDescription}</p>
+  ${featureList}
+  <p><em>Fast UK delivery by LandOfEssentials.</em></p>
+</div>`.trim();
+}
 
+// Robust matching maps
+function buildShopifyMaps(shopifyData) {
+  const handleMap = new Map();
+  const titleMap = new Map();
+  const skuMap = new Map();
+  shopifyData.forEach(product => {
+    handleMap.set(product.handle.toLowerCase(), product);
+    const altHandle = product.handle.replace(/-\d+$/, '').toLowerCase();
+    if (altHandle !== product.handle.toLowerCase()) handleMap.set(altHandle, product);
+    const t = normalizeTitle(product.title);
+    if (t) titleMap.set(t, product);
+    const sku = product.variants?.[0]?.sku;
+    if (sku) skuMap.set(sku.toLowerCase(), product);
+  });
+  return { handleMap, titleMap, skuMap };
+}
+function matchShopifyProduct(apifyProduct, maps) {
+  const key = apifyProduct.handle.toLowerCase();
+  let product = maps.handleMap.get(key);
+  if (product) return { product, matchType: 'handle' };
+  if (apifyProduct.sku) {
+    const bySku = maps.skuMap.get(apifyProduct.sku.toLowerCase());
+    if (bySku) return { product: bySku, matchType: 'sku' };
+  }
+  const t = normalizeTitle(apifyProduct.title);
+  const byTitle = maps.titleMap.get(t);
+  if (byTitle) return { product: byTitle, matchType: 'title' };
+  const parts = key.split('-').filter(p => p.length > 3);
+  if (parts.length > 2) {
+    for (const [shopifyHandle, prod] of maps.handleMap) {
+      const matching = parts.filter(part => shopifyHandle.includes(part));
+      if (matching.length >= parts.length * 0.6) return { product: prod, matchType: 'partial-handle' };
+    }
+  }
+  return { product: null, matchType: 'none' };
+}
+
+// Apify → internal product mapping
 function processApifyProducts(apifyData, options = { processPrice: true }) {
   return apifyData.map((item, index) => {
     const handle = extractHandleFromCanonicalUrl(item, index);
@@ -319,12 +402,8 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
       return null;
     }
 
-    let cleanTitle = item.title || 'Untitled Product';
-    cleanTitle = cleanTitle.replace(/\b\d{4}\b/g, '')
-      .replace(/\s*(large letter rate|parcel rate|big parcel rate|letter rate)\s*/gi, '')
-      .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const rawTitle = item.title || 'Untitled Product';
+    const cleanTitle = sanitizeProductTitle(rawTitle);
 
     // Inventory normalization with status
     let inventory = item.variants?.[0]?.stockQuantity || item.stock || 20;
@@ -379,7 +458,7 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
 
     const images = [];
     if (Array.isArray(item.medias)) {
-      for (let i = 0; i < Math.min(3, item.medias.length); i++) {
+      for (let i = 0; i < Math.min(5, item.medias.length); i++) {
         if (item.medias[i]?.url) images.push(item.medias[i].url);
       }
     }
@@ -393,7 +472,12 @@ function processApifyProducts(apifyData, options = { processPrice: true }) {
       compareAtPrice,
       inventory, images, vendor: 'LandOfEssentials'
     };
-    if (options.processPrice) productData.seoDescription = generateSEODescription(productData);
+    if (options.processPrice) {
+      productData.seoDescription = generateSEODescription(productData);
+      productData.seoHtml = buildProductHtml(productData);
+      productData.seoTitle = buildMetaTitle(productData);
+      productData.seoMetaDescription = (productData.seoDescription || '').slice(0, 320);
+    }
     return productData;
   }).filter(Boolean);
 }
@@ -466,12 +550,10 @@ async function createNewProductsJob(token, apifyProducts) {
 
   addLog(`Planned new products (after robust matching): ${newCandidates.length}`, 'info');
 
-  // Failsafe check against ALL Shopify products
   if (!checkFailsafeConditions('products', { toCreate: newCandidates.length, existingCount: shopifyAll.length })) {
     return { created: 0, errors: 0, total: newCandidates.length };
   }
 
-  // Cap per run for safety (first-time onboarding)
   const toCreateList = newCandidates.slice(0, MAX_CREATE_PER_RUN);
   if (newCandidates.length > toCreateList.length) {
     addLog(`Create cap applied: ${toCreateList.length}/${newCandidates.length} this run (MAX_CREATE_PER_RUN=${MAX_CREATE_PER_RUN})`, 'warning');
@@ -487,13 +569,18 @@ async function createNewProductsJob(token, apifyProducts) {
     for (const product of batch) {
       if (shouldAbort(token)) { addLog('Aborting product creation due to pause/failsafe', 'warning'); break; }
       try {
+        // Build product with SEO body and images inline
         const shopifyProduct = {
           title: product.title,
-          body_html: (product.seoDescription || '').replace(/\n/g, '<br>'),
+          body_html: product.seoHtml || (product.seoDescription || '').replace(/\n/g, '<br>'),
           handle: product.handle,
           vendor: product.vendor,
           product_type: 'General',
+          status: 'active',
           tags: `Supplier:Apify,Cost:${product.originalPrice},SKU:${product.sku},Auto-Sync`,
+          metafields_global_title_tag: product.seoTitle || product.title,
+          metafields_global_description_tag: product.seoMetaDescription || product.seoDescription || '',
+          images: (product.images || []).slice(0, 5).map(src => ({ src })),
           variants: [{
             price: product.price,
             compare_at_price: product.compareAtPrice,
@@ -507,7 +594,7 @@ async function createNewProductsJob(token, apifyProducts) {
         };
 
         await shopifyClient.post('/products.json', { product: shopifyProduct });
-        addLog(`Created: ${product.title} (£${product.price}) with tracking enabled`, 'success');
+        addLog(`Created: ${product.title} (images: ${product.images?.length || 0}) with SEO body`, 'success');
         created++;
         stats.newProducts++;
         await new Promise(r => setTimeout(r, 3000));
@@ -982,11 +1069,9 @@ app.get('/', (req, res) => {
     function addLogEntry(message, type) {
       const logContainer = document.getElementById('logContainer');
       const time = new Date().toLocaleTimeString();
-      const color = type === 'success' ? 'text-green-400' : 'text-red-400';
-      const other = type === 'warning' ? 'text-yellow-400' : 'text-gray-300';
-      const cls = (type === 'success' || type === 'error') ? color : other;
+      const color = type === 'success' ? 'text-green-400' : type === 'error' ? 'text-red-400' : type === 'warning' ? 'text-yellow-400' : 'text-gray-300';
       const newLog = document.createElement('div');
-      newLog.className = cls;
+      newLog.className = color;
       newLog.textContent = '[' + time + '] ' + message;
       logContainer.insertBefore(newLog, logContainer.firstChild);
     }
@@ -1087,7 +1172,145 @@ app.post('/api/pause', (req, res) => {
   res.json({ success: true, paused: systemPaused });
 });
 
+// Telegram webhook: set TELEGRAM_WEBHOOK_SECRET and configure bot webhook to
+// https://your-domain/telegram/webhook/<TELEGRAM_WEBHOOK_SECRET>
+app.post('/telegram/webhook/:secret?', async (req, res) => {
+  try {
+    if (TELEGRAM_WEBHOOK_SECRET && req.params.secret !== TELEGRAM_WEBHOOK_SECRET) {
+      return res.status(403).json({ ok: true });
+    }
+    const update = req.body || {};
+    const msg = update.message || update.edited_message;
+    if (!msg || !msg.text) return res.json({ ok: true });
+
+    const chatId = String(msg.chat?.id || '');
+    if (TELEGRAM_CHAT_ID && String(TELEGRAM_CHAT_ID) !== chatId) {
+      return res.json({ ok: true }); // ignore unknown chats
+    }
+
+    const originalText = String(msg.text).trim();
+    const text = originalText.toLowerCase();
+
+    // Commands
+    if (text === '/status' || text === 'status') {
+      const summary =
+        `Status: ${systemPaused ? 'PAUSED' : 'ACTIVE'}${failsafeTriggered ? ' (FAILSAFE)' : ''}\n` +
+        `Totals: new=${stats.newProducts}, inv=${stats.inventoryUpdates}, disc=${stats.discontinued}, errors=${stats.errors}\n` +
+        `Last inv: updated=${lastRun.inventory.updated}, errors=${lastRun.inventory.errors}\n` +
+        `Last prod: created=${lastRun.products.created}, errors=${lastRun.products.errors}`;
+      await notifyTelegram(summary);
+      return res.json({ ok: true });
+    }
+
+    if (text === '/pause' || text === 'pause') {
+      systemPaused = true;
+      abortVersion++; // stop jobs
+      addLog('System paused via Telegram', 'warning');
+      await notifyTelegram('⏸ System paused');
+      return res.json({ ok: true });
+    }
+
+    if (text === '/resume' || text === 'resume') {
+      // Clear failsafe and resume
+      failsafeTriggered = false;
+      failsafeReason = '';
+      systemPaused = false;
+      addLog('System resumed via Telegram (failsafe cleared if any)', 'info');
+      await notifyTelegram('▶️ System resumed');
+      return res.json({ ok: true });
+    }
+
+    if (text.startsWith('/oos ') || text.startsWith('oos ') || text.startsWith('/set0 ') || text.startsWith('set0 ')) {
+      const key = originalText.split(' ').slice(1).join(' ').trim();
+      if (!key) {
+        await notifyTelegram('Usage: /oos <handle-or-product-url-or-title>');
+        return res.json({ ok: true });
+      }
+      try {
+        const result = await markProductOutOfStockByKey(key);
+        await notifyTelegram(result ? `✅ Set OOS: ${result.title}` : '❌ Product not found');
+      } catch (e) {
+        addLog(`Telegram OOS error: ${e.message}`, 'error');
+        await notifyTelegram(`❌ Failed to set OOS: ${e.message}`);
+      }
+      return res.json({ ok: true });
+    }
+
+    // Unknown command
+    await notifyTelegram('Commands:\n/status\n/pause\n/resume\n/oos <handle|url|title>');
+    res.json({ ok: true });
+  } catch (e) {
+    addLog(`Telegram webhook error: ${e.message}`, 'error');
+    res.json({ ok: true });
+  }
+});
+
+async function markProductOutOfStockByKey(key) {
+  // Try to extract handle from URL or accept raw handle/title
+  let handleCandidate = key;
+  try {
+    if (key.includes('/products/')) {
+      let part = key.split('/products/')[1];
+      if (part.includes('?')) part = part.split('?')[0];
+      handleCandidate = part.replace(/\/+$/, '').trim();
+    }
+  } catch {}
+
+  // Fetch all Shopify products to search
+  const shopifyAll = await getShopifyProducts({ onlyApifyTag: false });
+  const maps = buildShopifyMaps(shopifyAll);
+
+  // Try handle match
+  let product = maps.handleMap.get(handleCandidate.toLowerCase());
+
+  // Fallback: try normalized title match
+  if (!product) {
+    const t = normalizeTitle(key);
+    product = maps.titleMap.get(t);
+  }
+
+  if (!product) return null;
+
+  // Ensure tracking and set OOS
+  const variant = product.variants?.[0];
+  if (!variant) throw new Error('No variant found');
+
+  if (!variant.inventory_management) {
+    await enableInventoryTracking(product.id, variant.id);
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  // Connect inventory item to location if needed
+  const checkResponse = await shopifyClient.get(
+    `/inventory_levels.json?inventory_item_ids=${variant.inventory_item_id}&location_ids=${config.shopify.locationId}`
+  ).catch(() => null);
+  if (!checkResponse?.data?.inventory_levels?.length) {
+    await shopifyClient.post('/inventory_levels/connect.json', {
+      location_id: parseInt(config.shopify.locationId),
+      inventory_item_id: variant.inventory_item_id
+    }).catch(() => {});
+  }
+
+  await shopifyClient.post('/inventory_levels/set.json', {
+    location_id: parseInt(config.shopify.locationId),
+    inventory_item_id: variant.inventory_item_id,
+    available: 0
+  });
+
+  addLog(`Telegram OOS: ${product.title} set to 0`, 'success');
+  return { id: product.id, title: product.title, handle: product.handle };
+}
+
 // Background-trigger endpoints: return immediately
+app.post('/api/failsafe/clear', (req, res) => {
+  failsafeTriggered = false;
+  failsafeReason = '';
+  lastFailsafeNotified = '';
+  addLog('Failsafe cleared manually', 'info');
+  notifyTelegram('✅ Failsafe cleared');
+  res.json({ success: true });
+});
+
 app.post('/api/sync/products', async (req, res) => {
   const started = startBackgroundJob('products', 'Product sync', async (token) => {
     try {
