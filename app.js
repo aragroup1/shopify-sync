@@ -53,15 +53,16 @@ function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); c
 // --- Data Fetching & Processing ---
 async function getApifyProducts() { let allItems = []; let offset = 0; addLog('Starting Apify product fetch...', 'info'); try { while (true) { const { data } = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=1000&offset=${offset}`); allItems.push(...data); if (data.length < 1000) break; offset += 1000; } } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info'); return allItems; }
 async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) { let allProducts = []; addLog(`Starting Shopify fetch...`, 'info'); try { let url = `/products.json?limit=250&fields=${fields}`; while (url) { const response = await shopifyClient.get(url); allProducts.push(...response.data.products); const linkHeader = response.headers.link; url = null; if (linkHeader) { const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"')); if (nextLink) { const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/); if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`; } } await new Promise(r => setTimeout(r, 500)); } } catch (error) { addLog(`Shopify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Shopify fetch complete: ${allProducts.length} total products.`, 'info'); return allProducts; }
+async function getShopifyInventoryLevels(inventoryItemIds) { const inventoryMap = new Map(); addLog(`Fetching inventory for ${inventoryItemIds.length} items...`, 'info'); for (let i = 0; i < inventoryItemIds.length; i += 50) { const batch = inventoryItemIds.slice(i, i + 50); let retries = 0; while (retries < 5) { try { const { data } = await shopifyClient.get(`/inventory_levels.json?inventory_item_ids=${batch.join(',')}&location_ids=${config.shopify.locationId}`); data.inventory_levels.forEach(level => inventoryMap.set(level.inventory_item_id, level.available || 0)); break; } catch (error) { if (error.response?.status === 429) { retries++; const retryAfter = error.response.headers['retry-after'] || 2 ** retries; addLog(`Rate limit hit. Retrying in ${retryAfter}s...`, 'warning'); await new Promise(r => setTimeout(r, retryAfter * 1000)); } else { addLog(`Batch inventory fetch failed: ${error.message}`, 'error', error); break; } } } await new Promise(r => setTimeout(r, 600)); } addLog(`Fetched ${inventoryMap.size} inventory levels.`, 'info'); return inventoryMap; }
 
 // --- THIS FUNCTION IS NOW FIXED ---
 function normalizeForMatching(text = '') {
   return String(text)
     .toLowerCase()
-    .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ') // Remove content in parentheses
+    .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ')
     .replace(/\s*```math
-.*?```\s*/g, ' ') // Remove content in brackets
-    .replace(/\s*```math[\s\S]*?```\s*/g, ' ') // CORRECTED: Handles multi-line math blocks
+.*?```\s*/g, ' ')
+    .replace(/\s*```math[\s\S]*?```\s*/g, ' ') // CORRECTED: Handles multi-line content
     .replace(/-(parcel|large-letter|letter)-rate$/i, '')
     .replace(/-p\d+$/i, '')
     .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
