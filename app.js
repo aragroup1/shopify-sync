@@ -168,20 +168,17 @@ async function getApifyProducts() {
 
 async function getShopifyProducts({ onlyApifyTag = true, fields = 'id,handle,title,variants,tags,status' } = {}) {
   let allProducts = [];
-  let pageNum = 0;
   addLog(`Starting Shopify fetch (onlyApifyTag: ${onlyApifyTag})...`, 'info');
   try {
     let url = `/products.json?limit=250&fields=${fields}`;
     while (url) {
-      pageNum++;
       const response = await shopifyClient.get(url);
       const products = response.data.products;
       allProducts.push(...products);
       const linkHeader = response.headers.link;
       url = null;
       if (linkHeader) {
-        const links = linkHeader.split(',');
-        const nextLink = links.find(s => s.includes('rel="next"'));
+        const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
         if (nextLink) {
           const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
           if (pageInfoMatch) { 
@@ -251,13 +248,13 @@ function normalizeHandle(input, index) {
 
 function processApifyProducts(apifyData, options = { processPrice: true }) {
   return apifyData.map((item, index) => {
+    if (!item.title) return null; // Skip items without a title
     const handle = normalizeHandle(item.handle || item.title, index);
     let inventory = item.variants?.[0]?.stockQuantity || item.stock || 20;
     const rawStatus = item.variants?.[0]?.price?.stockStatus || item.stockStatus || item.availability || '';
     const isOut = String(rawStatus).toLowerCase().includes('out');
     if (isOut) inventory = 0;
     
-    // Extract price if needed
     let price = '0.00';
     if (options.processPrice && item.variants?.[0]?.price?.value) {
       price = String(item.variants[0].price.value);
@@ -281,25 +278,46 @@ function buildShopifyMaps(shopifyData) {
     handleMap.set(product.handle.toLowerCase(), product);
     titleMap.set(normalizeTitle(product.title), product);
     const sku = product.variants?.[0]?.sku;
-    if (sku) skuMap.set(sku.toLowerCase(), product);
+    if (sku && sku.trim() !== '') skuMap.set(sku.toLowerCase(), product);
   });
   return { handleMap, titleMap, skuMap };
 }
 
-function matchShopifyProduct(apifyProduct, maps) {
-  let product = maps.handleMap.get(apifyProduct.handle.toLowerCase());
-  if (product) return { product, matchType: 'handle' };
-  if (apifyProduct.sku) {
+/**
+ * Matches an Apify product to a Shopify product using a flexible, multi-step approach.
+ * This is more robust against inconsistencies in handles and titles.
+ * @param {object} apifyProduct - The processed product data from Apify.
+ * @param {object} maps - The maps of Shopify products (handleMap, titleMap, skuMap).
+ * @returns {object} - { product, matchType } or { product: null, matchType: 'none' }.
+ */
+function flexibleMatchShopifyProduct(apifyProduct, maps) {
+  // 1. Prioritize SKU match (most reliable)
+  if (apifyProduct.sku && apifyProduct.sku.trim() !== '') {
     const bySku = maps.skuMap.get(apifyProduct.sku.toLowerCase());
     if (bySku) return { product: bySku, matchType: 'sku' };
   }
+
+  // 2. Flexible Handle Match (checks if Shopify handle STARTS WITH Apify handle)
+  // This solves the "-parcel-rate" and other suffix issues.
+  const apifyHandle = apifyProduct.handle.toLowerCase();
+  for (const [shopifyHandle, shopifyProduct] of maps.handleMap.entries()) {
+    if (shopifyHandle.startsWith(apifyHandle)) {
+      return { product: shopifyProduct, matchType: 'handle_prefix' };
+    }
+  }
+
+  // 3. Normalized Title Match (fallback)
   const byTitle = maps.titleMap.get(normalizeTitle(apifyProduct.title));
   if (byTitle) return { product: byTitle, matchType: 'title' };
+
+  // 4. No match found
   return { product: null, matchType: 'none' };
 }
 
+
 // --- CORE JOB LOGIC ---
 async function fixInventoryTrackingJob(token) {
+  // ... (this function remains unchanged)
   addLog('Starting job to fix inventory tracking for all products...', 'info');
   let fixedCount = 0;
   let errors = 0;
@@ -353,6 +371,7 @@ async function fixInventoryTrackingJob(token) {
 }
 
 async function executeInventoryUpdates(updates, token) {
+  // ... (this function remains unchanged)
   let updated = 0, errors = 0;
   addLog(`Executing ${updates.length} inventory quantity updates...`, 'info');
   for (const update of updates) {
@@ -378,7 +397,7 @@ async function executeInventoryUpdates(updates, token) {
 
 async function updateInventoryJob(token) {
   addLog('Starting inventory sync...', 'info');
-  mismatches = []; // Clear previous mismatches
+  mismatches = [];
   
   try {
     const [apifyData, shopifyData] = await Promise.all([
@@ -401,20 +420,23 @@ async function updateInventoryJob(token) {
     let alreadyInSyncCount = 0;
     
     processedProducts.forEach((apifyProduct) => {
-      const { product: shopifyProduct } = matchShopifyProduct(apifyProduct, maps);
+      // USE THE NEW FLEXIBLE MATCHING FUNCTION
+      const { product: shopifyProduct, matchType } = flexibleMatchShopifyProduct(apifyProduct, maps);
+      
       if (!shopifyProduct || !shopifyProduct.variants?.[0]?.inventory_item_id) {
-        mismatches.push({ 
-          apifyTitle: apifyProduct.title, 
-          apifyHandle: apifyProduct.handle, 
-          shopifyHandle: 'NOT FOUND' 
-        });
+        mismatches.push({ apifyTitle: apifyProduct.title, apifyHandle: apifyProduct.handle, shopifyHandle: 'NOT FOUND' });
         return;
       }
+
+      addLog(`Matched "${apifyProduct.title}" via ${matchType}`, 'info');
+
       const inventoryItemId = shopifyProduct.variants[0].inventory_item_id;
-      let currentInventory = parseInt(inventoryLevels.get(inventoryItemId), 10);
-      if (isNaN(currentInventory)) { 
-        currentInventory = 0; 
+      let currentInventory = inventoryLevels.get(inventoryItemId); // Can be undefined
+      if (typeof currentInventory !== 'number') { 
+          currentInventory = 0;
+          addLog(`Inventory level not found for "${shopifyProduct.title}", assuming 0.`, 'warning');
       }
+
       const targetInventory = parseInt(apifyProduct.inventory, 10) || 0;
       if (currentInventory === targetInventory) { 
         alreadyInSyncCount++; 
@@ -423,20 +445,12 @@ async function updateInventoryJob(token) {
       
       addLog(`Mismatch for "${shopifyProduct.title}" (Handle: ${shopifyProduct.handle}): Shopify Stock = ${currentInventory}, Apify Stock = ${targetInventory}. Queuing update.`, 'warning');
       
-      inventoryUpdates.push({ 
-        title: shopifyProduct.title, 
-        currentInventory, 
-        newInventory: targetInventory, 
-        inventoryItemId: inventoryItemId 
-      });
+      inventoryUpdates.push({ title: shopifyProduct.title, currentInventory, newInventory: targetInventory, inventoryItemId });
     });
     
     addLog(`Updates prepared: ${inventoryUpdates.length}. In sync: ${alreadyInSyncCount}. Mismatches: ${mismatches.length}`, 'info');
     
-    if (!checkFailsafeConditions('inventory', { 
-      updatesNeeded: inventoryUpdates.length, 
-      totalApifyProducts: apifyData.length 
-    }, { type: 'inventory', data: inventoryUpdates })) { 
+    if (!checkFailsafeConditions('inventory', { updatesNeeded: inventoryUpdates.length, totalApifyProducts: apifyData.length }, { type: 'inventory', data: inventoryUpdates })) { 
       return; 
     }
     
@@ -446,11 +460,7 @@ async function updateInventoryJob(token) {
   } catch (error) { 
     addLog(`Inventory workflow failed: ${error.message}`, 'error'); 
     stats.errors++; 
-    lastRun.inventory = { 
-      updated: 0, 
-      errors: (lastRun.inventory.errors || 0) + 1, 
-      at: new Date().toISOString() 
-    }; 
+    lastRun.inventory = { updated: 0, errors: (lastRun.inventory.errors || 0) + 1, at: new Date().toISOString() }; 
   }
 }
 
@@ -465,9 +475,9 @@ async function handleDiscontinuedProductsJob(token) {
     const shopifyMaps = buildShopifyMaps(shopifyData);
     const matchedShopifyIds = new Set();
     
-    // FIX: Use shopifyMaps instead of undefined 'maps'
     apifyProcessed.forEach(p => { 
-      const { product } = matchShopifyProduct(p, shopifyMaps); 
+      // USE THE NEW FLEXIBLE MATCHING FUNCTION
+      const { product } = flexibleMatchShopifyProduct(p, shopifyMaps); 
       if (product) matchedShopifyIds.add(product.id); 
     });
     
@@ -491,16 +501,10 @@ async function handleDiscontinuedProductsJob(token) {
       if (shouldAbort(token)) break;
       try {
         if (product.variants?.[0]?.inventory_item_id) { 
-          await shopifyClient.post('/inventory_levels/set.json', { 
-            location_id: parseInt(config.shopify.locationId), 
-            inventory_item_id: product.variants[0].inventory_item_id, 
-            available: 0 
-          }); 
+          await shopifyClient.post('/inventory_levels/set.json', { location_id: parseInt(config.shopify.locationId), inventory_item_id: product.variants[0].inventory_item_id, available: 0 }); 
         }
         if (product.status === 'active') { 
-          await shopifyClient.put(`/products/${product.id}.json`, { 
-            product: { id: product.id, status: 'draft' } 
-          }); 
+          await shopifyClient.put(`/products/${product.id}.json`, { product: { id: product.id, status: 'draft' } }); 
         }
         addLog(`Discontinued: "${product.title}" (0 stock, status set to DRAFT).`, 'success');
         discontinuedCount++;
@@ -522,13 +526,11 @@ async function handleDiscontinuedProductsJob(token) {
 async function createNewProductsJob(token) {
   addLog('Starting new product creation job...', 'info');
   let created = 0, errors = 0;
-  
   try {
     const [apifyData, shopifyData] = await Promise.all([
       getApifyProducts(),
       getShopifyProducts({ onlyApifyTag: true })
     ]);
-    
     if (shouldAbort(token)) return;
     
     const apifyProcessed = processApifyProducts(apifyData, { processPrice: true });
@@ -537,31 +539,26 @@ async function createNewProductsJob(token) {
     
     for (const apifyProduct of apifyProcessed) {
       if (shouldAbort(token)) break;
-      
-      const { product: existingProduct } = matchShopifyProduct(apifyProduct, shopifyMaps);
+      // USE THE NEW FLEXIBLE MATCHING FUNCTION
+      const { product: existingProduct } = flexibleMatchShopifyProduct(apifyProduct, shopifyMaps);
       if (!existingProduct) {
         toCreate.push(apifyProduct);
       }
     }
     
     addLog(`Found ${toCreate.length} products to create`, 'info');
-    
-    // Limit the number of products to create per run
     const limitedToCreate = toCreate.slice(0, MAX_CREATE_PER_RUN);
-    
     if (limitedToCreate.length > 0) {
       addLog(`Creating ${limitedToCreate.length} products (limited to ${MAX_CREATE_PER_RUN} per run)`, 'info');
     }
     
     for (const product of limitedToCreate) {
       if (shouldAbort(token)) break;
-      
       try {
         const shopifyProduct = {
           title: product.title,
           handle: product.handle,
           vendor: 'Manchester Wholesale',
-          product_type: '',
           tags: 'Supplier:Apify',
           status: 'active',
           variants: [{
@@ -571,52 +568,35 @@ async function createNewProductsJob(token) {
             inventory_quantity: product.inventory
           }]
         };
-        
         const response = await shopifyClient.post('/products.json', { product: shopifyProduct });
-        
-        // Set inventory at the location
         if (response.data.product?.variants?.[0]?.inventory_item_id) {
-          try {
-            await shopifyClient.post('/inventory_levels/connect.json', {
-              location_id: parseInt(config.shopify.locationId),
-              inventory_item_id: response.data.product.variants[0].inventory_item_id
-            });
-          } catch (connectError) {
-            if (connectError.response?.status !== 422) {
-              addLog(`Warning: Could not connect inventory location for "${product.title}"`, 'warning');
-            }
-          }
-          
-          await shopifyClient.post('/inventory_levels/set.json', {
-            location_id: parseInt(config.shopify.locationId),
-            inventory_item_id: response.data.product.variants[0].inventory_item_id,
-            available: product.inventory
+          const invItemId = response.data.product.variants[0].inventory_item_id;
+          await shopifyClient.post('/inventory_levels/connect.json', { location_id: parseInt(config.shopify.locationId), inventory_item_id: invItemId }).catch(e => {
+            if (e.response?.status !== 422) addLog(`Warning: Could not connect inventory for "${product.title}"`, 'warning');
           });
+          await shopifyClient.post('/inventory_levels/set.json', { location_id: parseInt(config.shopify.locationId), inventory_item_id: invItemId, available: product.inventory });
         }
-        
         created++;
         stats.newProducts++;
         addLog(`✓ Created: "${product.title}" with ${product.inventory} stock`, 'success');
-        
       } catch (error) {
         errors++;
         stats.errors++;
-        addLog(`✗ Failed to create "${product.title}": ${error.message}`, 'error');
+        addLog(`✗ Failed to create "${product.title}": ${error.response?.data?.errors ? JSON.stringify(error.response.data.errors) : error.message}`, 'error');
       }
-      
-      await new Promise(r => setTimeout(r, 1000)); // Rate limiting
+      await new Promise(r => setTimeout(r, 1000));
     }
-    
   } catch (error) {
     addLog(`Product creation job failed: ${error.message}`, 'error');
     errors++;
   }
-  
   lastRun.products = { created, errors, at: new Date().toISOString() };
   addLog(`Product creation complete. Created: ${created}, Errors: ${errors}`, 'success');
 }
 
+
 // --- UI AND API ---
+// ... (this section remains unchanged, no need to paste it here again)
 app.get('/', (req, res) => {
   let failsafeBanner = '';
   if (failsafeTriggered === 'pending') {
@@ -624,98 +604,22 @@ app.get('/', (req, res) => {
   } else if (failsafeTriggered === true) {
     failsafeBanner = `<div class="mb-4 p-4 rounded-lg bg-red-900 border-2 border-red-500"><div class="flex items-center justify-between"><div><h3 class="font-bold text-red-300">🚨 FAILSAFE TRIGGERED</h3><p class="text-sm text-red-400">${failsafeReason}</p></div><button onclick="clearFailsafe()" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg btn-hover">Clear Failsafe</button></div></div>`;
   }
-  
-  const html = `<!DOCTYPE html><html lang="en" class="dark"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Shopify Sync Dashboard</title><script src="https://cdn.tailwindcss.com"></script><style> body { background: linear-gradient(to bottom right, #1a1a2e, #16213e); } .card-hover { transition: all .3s ease-in-out; background: rgba(31,41,55,.2); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,.1); } .btn-hover:hover { transform: translateY(-1px); } .spinner { display: none; border: 4px solid rgba(255,255,255,.3); border-top: 4px solid #ff6e7f; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; margin-left: 8px;} @keyframes spin { 0% { transform: rotate(0deg);} 100%{ transform: rotate(360deg);} } </style></head><body class="min-h-screen font-sans text-gray-200"><div class="container mx-auto px-4 py-8"><h1 class="text-4xl font-extrabold tracking-tight text-white mb-8">Shopify Sync Dashboard</h1>${failsafeBanner}<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-4"><div class="rounded-2xl p-6 card-hover"><h3>New Products (Total)</h3><p class="text-3xl font-bold" id="newProducts">0</p></div><div class="rounded-2xl p-6 card-hover"><h3>Inventory Updates (Total)</h3><p class="text-3xl font-bold" id="inventoryUpdates">0</p></div><div class="rounded-2xl p-6 card-hover"><h3>Discontinued (Total)</h3><p class="text-3xl font-bold" id="discontinued">0</p></div><div class="rounded-2xl p-6 card-hover"><h3>Errors (Total)</h3><p class="text-3xl font-bold" id="errors">0</p></div></div><div class="rounded-2xl p-6 card-hover mb-8"><h2 class="text-2xl font-semibold text-white mb-4">System Controls</h2><div class="mb-6 p-4 rounded-lg" id="statusContainer"><div class="flex items-center justify-between"><div><h3 class="font-medium" id="systemStatus"></h3><p class="text-sm" id="systemStatusDesc"></p></div><div class="flex items-center"><button onclick="togglePause()" id="pauseButton" class="text-white px-4 py-2 rounded-lg btn-hover"></button><div id="pauseSpinner" class="spinner"></div></div></div></div><div class="flex flex-wrap gap-4"><button onclick="triggerSync('products')" class="bg-blue-500 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Create New Products<div id="productsSpinner" class="spinner"></div></button><button onclick="triggerSync('inventory')" class="bg-green-500 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Update Inventory<div id="inventorySpinner" class="spinner"></div></button><button onclick="triggerSync('discontinued')" class="bg-orange-500 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Check Discontinued<div id="discontinuedSpinner" class="spinner"></div></button><button onclick="triggerFix()" class="bg-indigo-500 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Fix Inventory Tracking<div id="fixSpinner" class="spinner"></div></button></div></div><div class="rounded-2xl p-6 card-hover mb-8"><h2 class="text-2xl font-semibold text-white mb-4">Mismatch Report</h2><div class="overflow-x-auto"><table class="w-full text-sm text-left text-gray-400 mismatch-table"><thead><tr><th>Apify Title</th><th>Apify Handle</th><th>Shopify Handle</th></tr></thead><tbody id="mismatchBody"></tbody></table></div></div><div class="rounded-2xl p-6 card-hover"><h2 class="text-2xl font-semibold text-white mb-4">Activity Log</h2><div class="bg-gray-900 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm" id="logContainer"></div></div></div><script>let systemPaused = ${systemPaused}; function togglePause() { fetch('/api/pause', { method: 'POST' }); } function clearFailsafe() { fetch('/api/failsafe/clear', { method: 'POST' }); } function confirmFailsafe() { fetch('/api/failsafe/confirm', { method: 'POST' }); } function abortFailsafe() { fetch('/api/failsafe/abort', { method: 'POST' }); } function triggerFix() { if (!confirm('This may take several minutes. Continue?')) return; const spinner = document.getElementById('fixSpinner'); spinner.style.display = 'inline-block'; fetch('/api/fix/inventory-tracking', { method: 'POST' }).finally(() => spinner.style.display = 'none'); } function triggerSync(type) { const spinner = document.getElementById(type + 'Spinner'); spinner.style.display = 'inline-block'; fetch('/api/sync/' + type, { method: 'POST' }).finally(() => spinner.style.display = 'none'); } function updateSystemStatus() { const statusEl = document.getElementById('systemStatus'); const descEl = document.getElementById('systemStatusDesc'); const btnEl = document.getElementById('pauseButton'); const containerEl = document.getElementById('statusContainer'); if (systemPaused) { statusEl.textContent = 'System Status: PAUSED'; statusEl.className='font-medium text-red-300'; descEl.textContent = 'Automatic syncing is disabled'; btnEl.textContent = 'Resume System'; btnEl.className='bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg btn-hover'; containerEl.className='mb-6 p-4 rounded-lg bg-red-900 border-red-700 border'; } else { statusEl.textContent = 'System Status: ACTIVE'; statusEl.className='font-medium text-green-300'; descEl.textContent = 'Automatic syncing is active'; btnEl.textContent = 'Pause System'; btnEl.className='bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg btn-hover'; containerEl.className='mb-6 p-4 rounded-lg bg-green-900 border-green-700 border'; } } setInterval(async () => { try { const res = await fetch('/api/status'); const data = await res.json(); document.getElementById('newProducts').textContent = data.stats.newProducts; document.getElementById('inventoryUpdates').textContent = data.stats.inventoryUpdates; document.getElementById('discontinued').textContent = data.stats.discontinued; document.getElementById('errors').textContent = data.stats.errors; document.getElementById('logContainer').innerHTML = data.logs.map(log => \`<div class="\${log.type === 'error' ? 'text-red-400' : log.type === 'warning' ? 'text-yellow-400' : 'text-gray-300'}">[\${new Date(log.timestamp).toLocaleTimeString()}] \${log.message}</div>\`).join(''); document.getElementById('mismatchBody').innerHTML = data.mismatches.slice(0, 20).map(m => \`<tr><td>\${m.apifyTitle || ''}</td><td>\${m.apifyHandle || ''}</td><td>\${m.shopifyHandle || ''}</td></tr>\`).join(''); if (data.systemPaused !== systemPaused || data.failsafeTriggered !== failsafeTriggered) { location.reload(); } updateSystemStatus(); } catch (e) {} }, 5000); updateSystemStatus(); </script></body></html>`;
-  
+  const html = `<!DOCTYPE html><html lang="en" class="dark"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Shopify Sync Dashboard</title><script src="https://cdn.tailwindcss.com"></script><style> body { background: linear-gradient(to bottom right, #1a1a2e, #16213e); } .card-hover { transition: all .3s ease-in-out; background: rgba(31,41,55,.2); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,.1); } .btn-hover:hover { transform: translateY(-1px); } .spinner { display: none; border: 4px solid rgba(255,255,255,.3); border-top: 4px solid #ff6e7f; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; margin-left: 8px;} @keyframes spin { 0% { transform: rotate(0deg);} 100%{ transform: rotate(360deg);} } </style></head><body class="min-h-screen font-sans text-gray-200"><div class="container mx-auto px-4 py-8"><h1 class="text-4xl font-extrabold tracking-tight text-white mb-8">Shopify Sync Dashboard</h1>${failsafeBanner}<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-4"><div class="rounded-2xl p-6 card-hover"><h3>New Products (Total)</h3><p class="text-3xl font-bold" id="newProducts">0</p></div><div class="rounded-2xl p-6 card-hover"><h3>Inventory Updates (Total)</h3><p class="text-3xl font-bold" id="inventoryUpdates">0</p></div><div class="rounded-2xl p-6 card-hover"><h3>Discontinued (Total)</h3><p class="text-3xl font-bold" id="discontinued">0</p></div><div class="rounded-2xl p-6 card-hover"><h3>Errors (Total)</h3><p class="text-3xl font-bold" id="errors">0</p></div></div><div class="rounded-2xl p-6 card-hover mb-8"><h2 class="text-2xl font-semibold text-white mb-4">System Controls</h2><div class="mb-6 p-4 rounded-lg" id="statusContainer"><div class="flex items-center justify-between"><div><h3 class="font-medium" id="systemStatus"></h3><p class="text-sm" id="systemStatusDesc"></p></div><div class="flex items-center"><button onclick="togglePause()" id="pauseButton" class="text-white px-4 py-2 rounded-lg btn-hover"></button><div id="pauseSpinner" class="spinner"></div></div></div></div><div class="flex flex-wrap gap-4"><button onclick="triggerSync('products')" class="bg-blue-500 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Create New Products<div id="productsSpinner" class="spinner"></div></button><button onclick="triggerSync('inventory')" class="bg-green-500 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Update Inventory<div id="inventorySpinner" class="spinner"></div></button><button onclick="triggerSync('discontinued')" class="bg-orange-500 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Check Discontinued<div id="discontinuedSpinner" class="spinner"></div></button><button onclick="triggerFix()" class="bg-indigo-500 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Fix Inventory Tracking<div id="fixSpinner" class="spinner"></div></button></div></div><div class="rounded-2xl p-6 card-hover mb-8"><h2 class="text-2xl font-semibold text-white mb-4">Mismatch Report</h2><div class="overflow-x-auto"><table class="w-full text-sm text-left text-gray-400 mismatch-table"><thead><tr><th>Apify Title</th><th>Apify Handle</th><th>Shopify Handle</th></tr></thead><tbody id="mismatchBody"></tbody></table></div></div><div class="rounded-2xl p-6 card-hover"><h2 class="text-2xl font-semibold text-white mb-4">Activity Log</h2><div class="bg-gray-900 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm" id="logContainer"></div></div></div><script>let systemPaused = ${systemPaused}; let failsafeTriggered = '${failsafeTriggered}'; function togglePause() { fetch('/api/pause', { method: 'POST' }); } function clearFailsafe() { fetch('/api/failsafe/clear', { method: 'POST' }); } function confirmFailsafe() { fetch('/api/failsafe/confirm', { method: 'POST' }); } function abortFailsafe() { fetch('/api/failsafe/abort', { method: 'POST' }); } function triggerFix() { if (!confirm('This may take several minutes. Continue?')) return; const spinner = document.getElementById('fixSpinner'); spinner.style.display = 'inline-block'; fetch('/api/fix/inventory-tracking', { method: 'POST' }).finally(() => spinner.style.display = 'none'); } function triggerSync(type) { const spinner = document.getElementById(type + 'Spinner'); spinner.style.display = 'inline-block'; fetch('/api/sync/' + type, { method: 'POST' }).finally(() => spinner.style.display = 'none'); } function updateSystemStatus() { const statusEl = document.getElementById('systemStatus'); const descEl = document.getElementById('systemStatusDesc'); const btnEl = document.getElementById('pauseButton'); const containerEl = document.getElementById('statusContainer'); if (systemPaused) { statusEl.textContent = 'System Status: PAUSED'; statusEl.className='font-medium text-red-300'; descEl.textContent = 'Automatic syncing is disabled'; btnEl.textContent = 'Resume System'; btnEl.className='bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg btn-hover'; containerEl.className='mb-6 p-4 rounded-lg bg-red-900 border-red-700 border'; } else { statusEl.textContent = 'System Status: ACTIVE'; statusEl.className='font-medium text-green-300'; descEl.textContent = 'Automatic syncing is active'; btnEl.textContent = 'Pause System'; btnEl.className='bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg btn-hover'; containerEl.className='mb-6 p-4 rounded-lg bg-green-900 border-green-700 border'; } } setInterval(async () => { try { const res = await fetch('/api/status'); const data = await res.json(); document.getElementById('newProducts').textContent = data.stats.newProducts; document.getElementById('inventoryUpdates').textContent = data.stats.inventoryUpdates; document.getElementById('discontinued').textContent = data.stats.discontinued; document.getElementById('errors').textContent = data.stats.errors; document.getElementById('logContainer').innerHTML = data.logs.map(log => \`<div class="\${log.type === 'error' ? 'text-red-400' : log.type === 'warning' ? 'text-yellow-400' : 'text-gray-300'}">[\${new Date(log.timestamp).toLocaleTimeString()}] \${log.message}</div>\`).join(''); document.getElementById('mismatchBody').innerHTML = data.mismatches.slice(0, 20).map(m => \`<tr><td>\${m.apifyTitle || ''}</td><td>\${m.apifyHandle || ''}</td><td>\${m.shopifyHandle || ''}</td></tr>\`).join(''); if (data.systemPaused !== systemPaused || data.failsafeTriggered !== failsafeTriggered) { location.reload(); } updateSystemStatus(); } catch (e) {} }, 5000); updateSystemStatus(); </script></body></html>`;
   res.send(html);
 });
-
-app.get('/api/status', (req, res) => { 
-  res.json({ stats, lastRun, logs, systemPaused, failsafeTriggered, failsafeReason, mismatches }); 
-});
-
-app.post('/api/pause', (req, res) => { 
-  systemPaused = !systemPaused; 
-  abortVersion++; 
-  addLog(`System manually ${systemPaused ? 'paused' : 'resumed'}.`, 'warning'); 
-  res.json({ success: true, paused: systemPaused }); 
-});
-
-app.post('/api/failsafe/clear', (req, res) => { 
-  failsafeTriggered = false; 
-  failsafeReason = ''; 
-  pendingFailsafeAction = null; 
-  systemPaused = false; 
-  addLog('Failsafe cleared, system resumed.', 'info'); 
-  res.json({ success: true }); 
-});
-
-app.post('/api/failsafe/confirm', (req, res) => { 
-  if (failsafeTriggered !== 'pending' || !pendingFailsafeAction) { 
-    return res.status(400).json({success: false}); 
-  } 
-  addLog('Failsafe action confirmed. Executing...', 'info'); 
-  const action = pendingFailsafeAction; 
-  failsafeTriggered = false; 
-  failsafeReason = ''; 
-  pendingFailsafeAction = null; 
-  systemPaused = false; 
-  if (action.type === 'inventory') { 
-    startBackgroundJob('inventory', 'Confirmed Inventory Sync', async (t) => executeInventoryUpdates(action.data, t)); 
-  } 
-  res.json({success: true}); 
-});
-
-app.post('/api/failsafe/abort', (req, res) => { 
-  if (failsafeTriggered !== 'pending') { 
-    return res.status(400).json({success: false}); 
-  } 
-  failsafeTriggered = true; 
-  pendingFailsafeAction = null; 
-  systemPaused = true; 
-  addLog('Pending action aborted. System remains paused.', 'warning'); 
-  res.json({success: true}); 
-});
-
-app.post('/api/fix/inventory-tracking', (req, res) => { 
-  startBackgroundJob('fixTracking', 'Fix Inventory Tracking', async (t) => fixInventoryTrackingJob(t)) 
-    ? res.json({success: true, message: "Fix job started."}) 
-    : res.status(409).json({success: false, message: "Fix job already running."}); 
-});
-
-app.post('/api/sync/inventory', (req, res) => { 
-  startBackgroundJob('inventory', 'Manual Inventory Sync', async (t) => updateInventoryJob(t)) 
-    ? res.json({success: true, message: "Sync started."}) 
-    : res.status(409).json({success: false, message: "Sync already running."}); 
-});
-
-app.post('/api/sync/products', (req, res) => { 
-  startBackgroundJob('products', 'Manual Product Sync', async (t) => createNewProductsJob(t)) 
-    ? res.json({success: true, message: "Create started."}) 
-    : res.status(409).json({success: false, message: "Create already running."}); 
-});
-
-app.post('/api/sync/discontinued', (req, res) => { 
-  startBackgroundJob('discontinued', 'Manual Discontinued Sync', async (t) => handleDiscontinuedProductsJob(t)) 
-    ? res.json({success: true, message: "Discontinued check started."}) 
-    : res.status(409).json({success: false, message: "Check already running."}); 
-});
-
+app.get('/api/status', (req, res) => { res.json({ stats, lastRun, logs, systemPaused, failsafeTriggered, failsafeReason, mismatches }); });
+app.post('/api/pause', (req, res) => { systemPaused = !systemPaused; abortVersion++; addLog(`System manually ${systemPaused ? 'paused' : 'resumed'}.`, 'warning'); res.json({ success: true, paused: systemPaused }); });
+app.post('/api/failsafe/clear', (req, res) => { failsafeTriggered = false; failsafeReason = ''; pendingFailsafeAction = null; systemPaused = false; addLog('Failsafe cleared, system resumed.', 'info'); res.json({ success: true }); });
+app.post('/api/failsafe/confirm', (req, res) => { if (failsafeTriggered !== 'pending' || !pendingFailsafeAction) { return res.status(400).json({success: false}); } addLog('Failsafe action confirmed. Executing...', 'info'); const action = pendingFailsafeAction; failsafeTriggered = false; failsafeReason = ''; pendingFailsafeAction = null; systemPaused = false; if (action.type === 'inventory') { startBackgroundJob('inventory', 'Confirmed Inventory Sync', async (t) => executeInventoryUpdates(action.data, t)); } res.json({success: true}); });
+app.post('/api/failsafe/abort', (req, res) => { if (failsafeTriggered !== 'pending') { return res.status(400).json({success: false}); } failsafeTriggered = true; pendingFailsafeAction = null; systemPaused = true; addLog('Pending action aborted. System remains paused.', 'warning'); res.json({success: true}); });
+app.post('/api/fix/inventory-tracking', (req, res) => { startBackgroundJob('fixTracking', 'Fix Inventory Tracking', async (t) => fixInventoryTrackingJob(t)) ? res.json({success: true, message: "Fix job started."}) : res.status(409).json({success: false, message: "Fix job already running."}); });
+app.post('/api/sync/inventory', (req, res) => { startBackgroundJob('inventory', 'Manual Inventory Sync', async (t) => updateInventoryJob(t)) ? res.json({success: true, message: "Sync started."}) : res.status(409).json({success: false, message: "Sync already running."}); });
+app.post('/api/sync/products', (req, res) => { startBackgroundJob('products', 'Manual Product Sync', async (t) => createNewProductsJob(t)) ? res.json({success: true, message: "Create started."}) : res.status(409).json({success: false, message: "Create already running."}); });
+app.post('/api/sync/discontinued', (req, res) => { startBackgroundJob('discontinued', 'Manual Discontinued Sync', async (t) => handleDiscontinuedProductsJob(t)) ? res.json({success: true, message: "Discontinued check started."}) : res.status(409).json({success: false, message: "Check already running."}); });
 // Scheduled jobs
-cron.schedule('0 1 * * *', () => { 
-  if (!systemPaused && !failsafeTriggered) 
-    startBackgroundJob('inventory', 'Scheduled inventory sync', (t) => updateInventoryJob(t)); 
-});
-
-cron.schedule('0 2 * * 5', () => { 
-  if (!systemPaused && !failsafeTriggered) 
-    startBackgroundJob('products', 'Scheduled Product Sync', (t) => createNewProductsJob(t)); 
-});
-
-cron.schedule('0 3 * * *', () => { 
-  if (!systemPaused && !failsafeTriggered) 
-    startBackgroundJob('discontinued', 'Scheduled Discontinued Check', (t) => handleDiscontinuedProductsJob(t)); 
-});
+cron.schedule('0 1 * * *', () => { if (!systemPaused && !failsafeTriggered) startBackgroundJob('inventory', 'Scheduled inventory sync', (t) => updateInventoryJob(t)); });
+cron.schedule('0 2 * * 5', () => { if (!systemPaused && !failsafeTriggered) startBackgroundJob('products', 'Scheduled Product Sync', (t) => createNewProductsJob(t)); });
+cron.schedule('0 3 * * *', () => { if (!systemPaused && !failsafeTriggered) startBackgroundJob('discontinued', 'Scheduled Discontinued Check', (t) => handleDiscontinuedProductsJob(t)); });
 
 app.listen(PORT, () => {
   addLog(`Server started on port ${PORT}`, 'success');
