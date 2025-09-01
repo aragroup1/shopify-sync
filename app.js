@@ -92,9 +92,8 @@ async function getShopifyProducts({ onlyApifyTag = true, fields = 'id,handle,tit
             allProducts.push(...products);
             addLog(`Shopify page ${pageNum}: fetched ${products.length} products (total: ${allProducts.length})`, 'info', 'fetch');
 
-            // CRITICAL FIX: Correctly parse Link header for cursor-based pagination
             const linkHeader = response.headers.link;
-            url = null; // Assume no next page unless found
+            url = null;
             if (linkHeader) {
                 const links = linkHeader.split(',');
                 const nextLink = links.find(s => s.includes('rel="next"'));
@@ -151,19 +150,16 @@ async function getShopifyInventoryLevels(inventoryItemIds, locationId) {
 }
 
 // --- CORE JOB LOGIC ---
-
 async function fixInventoryTrackingJob(token) {
     addLog('Starting job to fix inventory tracking for all products...', 'info', 'fixTracking');
     let fixedCount = 0;
     let errors = 0;
     try {
         const allShopifyProducts = await getShopifyProducts({ onlyApifyTag: false, fields: 'id,title,variants' });
-        
         for (const product of allShopifyProducts) {
             if (shouldAbort(token)) { addLog('Aborting fix job.', 'warning', 'fixTracking'); break; }
             const variant = product.variants?.[0];
             if (!variant) continue;
-
             let needsFix = false;
             if (variant.inventory_management !== 'shopify') {
                 needsFix = true;
@@ -185,7 +181,6 @@ async function fixInventoryTrackingJob(token) {
     addLog(`Fix job complete. Products fixed: ${fixedCount}. Errors: ${errors}.`, 'success', 'fixTracking');
     return { fixed: fixedCount, errors };
 }
-
 async function executeInventoryUpdates(updates, token) {
   let updated = 0, errors = 0;
   addLog(`Executing ${updates.length} inventory quantity updates...`, 'info', 'inventory');
@@ -205,12 +200,12 @@ async function executeInventoryUpdates(updates, token) {
   }
   return { updated, errors };
 }
-
 async function updateInventoryJob(token) {
   addLog('Starting inventory sync...', 'info', 'inventory');
   try {
     const [apifyData, shopifyData] = await Promise.all([ getApifyProducts(), getShopifyProducts({ onlyApifyTag: true }) ]);
     if (shouldAbort(token)) return { updated: 0, errors: 0 };
+    if (apifyData.length === 0) { addLog('Apify returned 0 products. Aborting sync.', 'warning', 'inventory'); return { updated: 0, errors: 0}; }
     
     const inventoryItemIds = shopifyData.map(p => p.variants?.[0]?.inventory_item_id).filter(Boolean);
     const inventoryLevels = await getShopifyInventoryLevels(inventoryItemIds, config.shopify.locationId);
@@ -244,7 +239,6 @@ async function updateInventoryJob(token) {
     return { updated, errors };
   } catch (error) { addLog(`Inventory workflow failed: ${error.message}`, 'error', 'inventory'); stats.errors++; return { updated: 0, errors: 1 }; }
 }
-
 async function handleDiscontinuedProductsJob(token) {
     addLog('Starting discontinued products check...', 'info', 'discontinued');
     let discontinuedCount = 0, errors = 0;
@@ -301,23 +295,19 @@ app.get('/', (req, res) => {
     } else if (failsafeTriggered === true) {
         failsafeBanner = `<div class="mb-4 p-4 rounded-lg bg-red-900 border-2 border-red-500"><div class="flex items-center justify-between"><div><h3 class="font-bold text-red-300">🚨 FAILSAFE TRIGGERED</h3><p class="text-sm text-red-400">${failsafeReason}</p></div><button onclick="clearFailsafe()" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg btn-hover">Clear Failsafe</button></div></div>`;
     }
-    res.send(`<!DOCTYPE html><html lang="en" class="dark"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Shopify Sync Dashboard</title><script src="https://cdn.tailwindcss.com"></script><style>body { background-color: #111827; color: #e5e7eb; } .card { background-color: #1f2937; border: 1px solid #374151; } .btn-hover:hover { transform: translateY(-1px); } .spinner { display: none; border: 4px solid rgba(255,255,255,.3); border-top: 4px solid #60a5fa; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; margin-left: 8px;} @keyframes spin { 0% { transform: rotate(0deg);} 100%{ transform: rotate(360deg);} }</style></head><body class="min-h-screen font-sans p-8"><div class="max-w-7xl mx-auto space-y-8"><h1 class="text-4xl font-bold">Shopify Sync Dashboard</h1><div class="card p-6 rounded-lg">${failsafeBanner}</div><div class="card p-6 rounded-lg"><h2 class="text-2xl font-semibold mb-4">System Controls</h2><div class="flex flex-wrap gap-4"><button onclick="triggerSync('inventory')" class="bg-green-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Update Inventory<div id="inventorySpinner" class="spinner"></div></button><button onclick="triggerSync('products')" class="bg-blue-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Create Products<div id="productsSpinner" class="spinner"></div></button><button onclick="triggerSync('discontinued')" class="bg-yellow-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Check Discontinued<div id="discontinuedSpinner" class="spinner"></div></button><button onclick="triggerFix()" class="bg-indigo-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Fix Inventory Tracking<div id="fixSpinner" class="spinner"></div></button></div></div><div class="card p-6 rounded-lg"><h2 class="text-2xl font-semibold mb-4">Activity Log</h2><div class="bg-gray-900 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm" id="logContainer">${logs.map(log => `<div>[${new Date(log.timestamp).toLocaleTimeString()}] ${log.message}</div>`).join('')}</div></div></div><script>async function triggerSync(type) { const spinner = document.getElementById(type + 'Spinner'); spinner.style.display = 'inline-block'; await fetch('/api/sync/' + type, { method: 'POST' }); spinner.style.display = 'none'; } async function triggerFix() { if (!confirm('This will scan all products and ensure their inventory tracking is enabled. This may take several minutes. Continue?')) return; const spinner = document.getElementById('fixSpinner'); spinner.style.display = 'inline-block'; await fetch('/api/fix/inventory-tracking', { method: 'POST' }); spinner.style.display = 'none'; } async function confirmFailsafe() { await fetch('/api/failsafe/confirm', { method: 'POST' }); location.reload(); } async function abortFailsafe() { await fetch('/api/failsafe/abort', { method: 'POST' }); location.reload(); } async function clearFailsafe() { await fetch('/api/failsafe/clear', { method: 'POST' }); location.reload(); }</script></body></html>`);
+    res.send(`<!DOCTYPE html><html lang="en" class="dark"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Shopify Sync Dashboard</title><script src="https://cdn.tailwindcss.com"></script><style>body { background-color: #111827; color: #e5e7eb; } .card { background-color: #1f2937; border: 1px solid #374151; } .btn-hover:hover { transform: translateY(-1px); } .spinner { display: none; border: 4px solid rgba(255,255,255,.3); border-top: 4px solid #60a5fa; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; margin-left: 8px;} @keyframes spin { 0% { transform: rotate(0deg);} 100%{ transform: rotate(360deg);} }</style></head><body class="min-h-screen font-sans p-8"><div class="max-w-7xl mx-auto space-y-8"><h1 class="text-4xl font-bold">Shopify Sync Dashboard</h1>${failsafeBanner}<div class="grid grid-cols-1 md:grid-cols-4 gap-6"><div class="card p-4 rounded-lg"><h3>New Products</h3><p class="text-2xl font-bold" id="statNew">0</p></div><div class="card p-4 rounded-lg"><h3>Inventory Updates</h3><p class="text-2xl font-bold" id="statUpdates">0</p></div><div class="card p-4 rounded-lg"><h3>Discontinued</h3><p class="text-2xl font-bold" id="statDisc">0</p></div><div class="card p-4 rounded-lg"><h3>Errors</h3><p class="text-2xl font-bold" id="statErrors">0</p></div></div><div class="card p-6 rounded-lg"><h2 class="text-2xl font-semibold mb-4">System Controls</h2><div class="flex items-center justify-between mb-4"><p>System Status: <span id="statusText" class="font-bold"></span></p><button id="pauseButton" onclick="togglePause()" class="px-4 py-2 rounded-lg btn-hover"></button></div><div class="flex flex-wrap gap-4"><button onclick="triggerSync('inventory')" class="bg-green-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Update Inventory<div id="inventorySpinner" class="spinner"></div></button><button onclick="triggerSync('products')" class="bg-blue-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Create Products<div id="productsSpinner" class="spinner"></div></button><button onclick="triggerSync('discontinued')" class="bg-yellow-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Check Discontinued<div id="discontinuedSpinner" class="spinner"></div></button><button onclick="triggerFix()" class="bg-indigo-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Fix Inventory Tracking<div id="fixSpinner" class="spinner"></div></button></div></div><div class="card p-6 rounded-lg"><h2 class="text-2xl font-semibold mb-4">Run History</h2><div id="runHistoryContainer"></div></div><div class="card p-6 rounded-lg"><h2 class="text-2xl font-semibold mb-4">Activity Log</h2><div class="bg-gray-900 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm" id="logContainer"></div></div></div><script>async function triggerSync(type) { const spinner = document.getElementById(type + 'Spinner'); spinner.style.display = 'inline-block'; await fetch('/api/sync/' + type, { method: 'POST' }); spinner.style.display = 'none'; } async function triggerFix() { if (!confirm('This will scan all products and ensure their inventory tracking is enabled. This may take several minutes. Continue?')) return; const spinner = document.getElementById('fixSpinner'); spinner.style.display = 'inline-block'; await fetch('/api/fix/inventory-tracking', { method: 'POST' }); spinner.style.display = 'none'; } async function confirmFailsafe() { await fetch('/api/failsafe/confirm', { method: 'POST' }); setTimeout(()=>location.reload(),1000); } async function abortFailsafe() { await fetch('/api/failsafe/abort', { method: 'POST' }); setTimeout(()=>location.reload(),1000); } async function clearFailsafe() { await fetch('/api/failsafe/clear', { method: 'POST' }); setTimeout(()=>location.reload(),1000); } async function togglePause() { await fetch('/api/pause', { method: 'POST' }); } function updateUI(data){ document.getElementById('statNew').textContent=data.stats.newProducts; document.getElementById('statUpdates').textContent=data.stats.inventoryUpdates; document.getElementById('statDisc').textContent=data.stats.discontinued; document.getElementById('statErrors').textContent=data.stats.errors; const statusText = document.getElementById('statusText'); const pauseButton = document.getElementById('pauseButton'); if(data.systemPaused){ statusText.textContent='PAUSED'; statusText.className='font-bold text-yellow-400'; pauseButton.textContent='Resume System'; pauseButton.className='px-4 py-2 rounded-lg btn-hover bg-green-600'; } else { statusText.textContent='ACTIVE'; statusText.className='font-bold text-green-400'; pauseButton.textContent='Pause System'; pauseButton.className='px-4 py-2 rounded-lg btn-hover bg-red-600'; } document.getElementById('logContainer').innerHTML = data.logs.map(log => \`<div class="\${log.type === 'success' ? 'text-green-400' : log.type === 'error' ? 'text-red-400' : log.type === 'warning' ? 'text-yellow-400' : 'text-gray-300'}">[\${new Date(log.timestamp).toLocaleTimeString()}] \${log.message}</div>\`).join(''); const historyContainer=document.getElementById('runHistoryContainer'); historyContainer.innerHTML = \`<table class="w-full text-left"><thead><tr><th>Type</th><th>Time</th><th>Result</th></tr></thead><tbody>\${data.runHistory.map(r=>\`<tr><td>\${r.type}</td><td>\${new Date(r.timestamp).toLocaleTimeString()}</td><td>\${JSON.stringify(r)}</td></tr>\`).join('')}</tbody></table>\`; } async function fetchStatus(){ try { const res = await fetch('/api/status'); const data = await res.json(); updateUI(data); } catch(e){} } setInterval(fetchStatus, 5000); fetchStatus(); </script></body></html>`);
 });
 
-app.post('/api/fix/inventory-tracking', (req, res) => {
-    startBackgroundJob('fixTracking', 'Fix Inventory Tracking', async (t) => fixInventoryTrackingJob(t)) ? res.json({s:1,m:"Fix job started."}) : res.status(409).json({s:0,m:"Fix job already running."});
-});
-app.post('/api/sync/inventory', (req, res) => {
-    startBackgroundJob('inventory', 'Manual Inventory Sync', async (t) => updateInventoryJob(t)) ? res.json({s:1,m:"Sync started."}) : res.status(409).json({s:0,m:"Sync already running."});
-});
-app.post('/api/sync/products', (req, res) => { /* ... full implementation ... */});
-app.post('/api/sync/discontinued', (req, res) => {
-    startBackgroundJob('discontinued', 'Manual Discontinued Sync', async (t) => handleDiscontinuedProductsJob(t)) ? res.json({s:1,m:"Discontinued check started."}) : res.status(409).json({s:0,m:"Check already running."});
-});
+app.get('/api/status', (req, res) => { res.json({ stats, runHistory, systemPaused, failsafeTriggered, failsafeReason, logs: logs.slice(0, 50) }); });
+app.post('/api/pause', (req, res) => { systemPaused = !systemPaused; abortVersion++; addLog(`System manually ${systemPaused ? 'paused' : 'resumed'}.`, 'warning'); res.json({ success: true }); });
+app.post('/api/fix/inventory-tracking', (req, res) => { startBackgroundJob('fixTracking', 'Fix Inventory Tracking', async (t) => fixInventoryTrackingJob(t)) ? res.json({s:1,m:"Fix job started."}) : res.status(409).json({s:0,m:"Fix job already running."}); });
+app.post('/api/sync/inventory', (req, res) => { startBackgroundJob('inventory', 'Manual Inventory Sync', async (t) => updateInventoryJob(t)) ? res.json({s:1,m:"Sync started."}) : res.status(409).json({s:0,m:"Sync already running."}); });
+app.post('/api/sync/products', (req, res) => { startBackgroundJob('products', 'Manual Product Sync', async (t) => createNewProductsJob(t, [])) ? res.json({s:1,m:"Create started."}) : res.status(409).json({s:0,m:"Create already running."}); });
+app.post('/api/sync/discontinued', (req, res) => { startBackgroundJob('discontinued', 'Manual Discontinued Sync', async (t) => handleDiscontinuedProductsJob(t)) ? res.json({s:1,m:"Discontinued check started."}) : res.status(409).json({s:0,m:"Check already running."}); });
 // ... Other API endpoints ...
 
 cron.schedule('0 1 * * *', () => { if (!systemPaused && !failsafeTriggered) startBackgroundJob('inventory', 'Scheduled inventory sync', async (t) => updateInventoryJob(t)); });
-cron.schedule('0 2 * * 5', () => { /* ... */ });
+cron.schedule('0 2 * * 5', () => { if (!systemPaused && !failsafeTriggered) startBackgroundJob('products', 'Scheduled Product Sync', async (t) => createNewProductsJob(t, [])); });
 cron.schedule('0 3 * * *', () => { if (!systemPaused && !failsafeTriggered) startBackgroundJob('discontinued', 'Scheduled Discontinued Check', async (t) => handleDiscontinuedProductsJob(t)); });
 
 app.listen(PORT, () => {
