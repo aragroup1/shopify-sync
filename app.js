@@ -53,23 +53,34 @@ function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); c
 // --- Data Fetching & Processing ---
 async function getApifyProducts() { let allItems = []; let offset = 0; addLog('Starting Apify product fetch...', 'info'); try { while (true) { const { data } = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=1000&offset=${offset}`); allItems.push(...data); if (data.length < 1000) break; offset += 1000; } } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info'); return allItems; }
 async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) { let allProducts = []; addLog(`Starting Shopify fetch...`, 'info'); try { let url = `/products.json?limit=250&fields=${fields}`; while (url) { const response = await shopifyClient.get(url); allProducts.push(...response.data.products); const linkHeader = response.headers.link; url = null; if (linkHeader) { const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"')); if (nextLink) { const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/); if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`; } } await new Promise(r => setTimeout(r, 500)); } } catch (error) { addLog(`Shopify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Shopify fetch complete: ${allProducts.length} total products.`, 'info'); return allProducts; }
-async function getShopifyInventoryLevels(inventoryItemIds) { const inventoryMap = new Map(); addLog(`Fetching inventory for ${inventoryItemIds.length} items...`, 'info'); for (let i = 0; i < inventoryItemIds.length; i += 50) { const batch = inventoryItemIds.slice(i, i + 50); let retries = 0; while (retries < 5) { try { const { data } = await shopifyClient.get(`/inventory_levels.json?inventory_item_ids=${batch.join(',')}&location_ids=${config.shopify.locationId}`); data.inventory_levels.forEach(level => inventoryMap.set(level.inventory_item_id, level.available || 0)); break; } catch (error) { if (error.response?.status === 429) { retries++; const retryAfter = error.response.headers['retry-after'] || 2 ** retries; addLog(`Rate limit hit. Retrying in ${retryAfter}s...`, 'warning'); await new Promise(r => setTimeout(r, retryAfter * 1000)); } else { addLog(`Batch inventory fetch failed: ${error.message}`, 'error', error); break; } } } await new Promise(r => setTimeout(r, 600)); } addLog(`Fetched ${inventoryMap.size} inventory levels.`, 'info'); return inventoryMap; }
 
-// --- THIS FUNCTION IS NOW FIXED ---
+/**
+ * Normalizes text for reliable matching by removing noise and standardizing format.
+ * This function is critical for comparing product titles and handles from different sources.
+ * @param {string} [text=''] - The input string to normalize.
+ * @returns {string} The normalized string.
+ */
 function normalizeForMatching(text = '') {
   return String(text)
     .toLowerCase()
+    // Remove specific placeholders for KaTeX math formulas
     .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ')
-    .replace(/\s*```math
-.*?```\s*/g, ' ')
-    .replace(/\s*```math[\s\S]*?```\s*/g, ' ') // CORRECTED: Handles multi-line content
+    // Remove multi-line ```math...``` blocks correctly by matching any character including newlines
+    .replace(/\s*```math[\s\S]*?```\s*/g, ' ')
+    // Remove specific, domain-related suffixes like shipping rates
     .replace(/-(parcel|large-letter|letter)-rate$/i, '')
+    // Remove pagination-style suffixes (e.g., "-p2")
     .replace(/-p\d+$/i, '')
+    // Remove common English "stop words" that add little unique value for matching
     .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
+    // Replace any character that is not a letter or number with a space
     .replace(/[^a-z0-9]+/g, ' ')
+    // Collapse multiple consecutive spaces into a single space
     .replace(/\s+/g, ' ')
+    // Remove any leading or trailing whitespace
     .trim();
 }
+
 function calculateRetailPrice(supplierCostString) { const cost = parseFloat(supplierCostString); if (isNaN(cost) || cost < 0) return '0.00'; let finalPrice; if (cost <= 1) finalPrice = cost + 5.5; else if (cost <= 2) finalPrice = cost + 5.95; else if (cost <= 3) finalPrice = cost + 6.99; else if (cost <= 5) finalPrice = cost * 3.2; else if (cost <= 7) finalPrice = cost * 2.5; else if (cost <= 9) finalPrice = cost * 2.2; else if (cost <= 12) finalPrice = cost * 2; else if (cost <= 20) finalPrice = cost * 1.9; else finalPrice = cost * 1.8; return finalPrice.toFixed(2); }
 function processApifyProducts(apifyData, { processPrice = true } = {}) { return apifyData.map(item => { if (!item || !item.title) return null; const handle = normalizeForMatching(item.handle || item.title).replace(/ /g, '-'); let inventory = item.variants?.[0]?.stockQuantity || item.stock || 20; if (String(item.variants?.[0]?.price?.stockStatus || item.stockStatus || item.availability || '').toLowerCase().includes('out')) inventory = 0; let sku = item.sku || item.variants?.[0]?.sku || ''; let price = '0.00'; if (item.variants?.[0]?.price?.value) { price = String(item.variants[0].price.value); if (processPrice) price = calculateRetailPrice(price); } const body_html = item.description || item.bodyHtml || ''; const images = item.images ? item.images.map(img => ({ src: img.src || img.url })).filter(img => img.src) : []; return { handle, title: item.title, inventory, sku, price, body_html, images, normalizedTitle: normalizeForMatching(item.title) }; }).filter(p => p.sku); }
 function buildShopifyMaps(shopifyData) { const skuMap = new Map(); const strippedHandleMap = new Map(); const normalizedTitleMap = new Map(); for (const product of shopifyData) { const sku = product.variants?.[0]?.sku; if (sku) skuMap.set(sku.toLowerCase(), product); strippedHandleMap.set(normalizeForMatching(product.handle).replace(/ /g, '-'), product); normalizedTitleMap.set(normalizeForMatching(product.title), product); } return { skuMap, strippedHandleMap, normalizedTitleMap, all: shopifyData }; }
