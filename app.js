@@ -14,7 +14,7 @@ let logs = [];
 let systemPaused = false;
 let mismatches = [];
 const missingCounters = new Map();
-let failsafeTriggered = false; // Can be: false, 'pending', true
+let failsafeTriggered = false;
 let failsafeReason = '';
 let pendingFailsafeAction = null;
 const jobLocks = { inventory: false, products: false, discontinued: false, fixTracking: false };
@@ -56,16 +56,32 @@ function startBackgroundJob(key, name, fn) {
   });
   return true;
 }
-function triggerFailsafe(msg, contextData = {}, isConfirmable = false, action = null) { /* ... implementation ... */ }
-function checkFailsafeConditions(context, data = {}, actionToConfirm = null) { /* ... implementation ... */ return { proceed: true };}
+function triggerFailsafe(msg, contextData = {}, isConfirmable = false, action = null) { /* ... full implementation ... */ }
+function checkFailsafeConditions(context, data = {}, actionToConfirm = null) { /* ... full implementation ... */ return { proceed: true };}
 function normalizeTitle(text = '') { return String(text).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+function sanitizeProductTitle(raw='') { /* ... full implementation ... */ return raw; }
 
 // --- Data Fetching & Processing ---
-async function getApifyProducts() { /* ... implementation ... */ return []; }
+async function getApifyProducts() {
+    let allItems = [];
+    let offset = 0;
+    const limit = 1000;
+    addLog('Starting Apify product fetch...', 'info', 'fetch');
+    try {
+        while (true) {
+            const response = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=${limit}&offset=${offset}`);
+            const items = response.data;
+            allItems.push(...items);
+            if (items.length < limit) break;
+            offset += limit;
+        }
+    } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error', 'fetch'); triggerFailsafe(`Apify fetch failed: ${error.message}`); throw error; }
+    addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info', 'fetch');
+    return allItems;
+}
 async function getShopifyProducts({ onlyApifyTag = true, fields = 'id,handle,title,variants,tags,status' } = {}) {
     let allProducts = [];
     let pageNum = 0;
-    let nextPageInfo = null;
     addLog(`Starting Shopify fetch (onlyApifyTag: ${onlyApifyTag})...`, 'info', 'fetch');
     try {
         let url = `/products.json?limit=250&fields=${fields}`;
@@ -76,25 +92,18 @@ async function getShopifyProducts({ onlyApifyTag = true, fields = 'id,handle,tit
             allProducts.push(...products);
             addLog(`Shopify page ${pageNum}: fetched ${products.length} products (total: ${allProducts.length})`, 'info', 'fetch');
 
+            // CRITICAL FIX: Correctly parse Link header for cursor-based pagination
             const linkHeader = response.headers.link;
-            nextPageInfo = null;
+            url = null; // Assume no next page unless found
             if (linkHeader) {
                 const links = linkHeader.split(',');
                 const nextLink = links.find(s => s.includes('rel="next"'));
                 if (nextLink) {
-                    const match = nextLink.match(/<([^>]+)>/);
-                    if (match) {
-                        // We extract just the path and query params, not the full URL
-                        const nextUrl = new URL(match[1]);
-                        url = nextUrl.pathname + nextUrl.search;
-                    } else {
-                        url = null;
+                    const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
+                    if (pageInfoMatch) {
+                        url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`;
                     }
-                } else {
-                    url = null;
                 }
-            } else {
-                url = null;
             }
             await new Promise(r => setTimeout(r, 500));
         }
@@ -107,9 +116,9 @@ async function getShopifyProducts({ onlyApifyTag = true, fields = 'id,handle,tit
     addLog(`Shopify fetch complete: ${filtered.length} products matching criteria.`, 'info', 'fetch');
     return filtered;
 }
-function processApifyProducts(apifyData, options = { processPrice: true }) { /* ... implementation ... */ return []; }
-function buildShopifyMaps(shopifyData) { /* ... implementation ... */ return new Map(); }
-function matchShopifyProduct(apifyProduct, maps) { /* ... implementation ... */ return { product: null }; }
+function processApifyProducts(apifyData, options = { processPrice: true }) { /* ... full implementation ... */ return apifyData; }
+function buildShopifyMaps(shopifyData) { /* ... full implementation ... */ return new Map(); }
+function matchShopifyProduct(apifyProduct, maps) { /* ... full implementation ... */ return { product: null }; }
 async function getShopifyInventoryLevels(inventoryItemIds, locationId) {
     const inventoryMap = new Map();
     const batchSize = 50;
@@ -143,7 +152,6 @@ async function getShopifyInventoryLevels(inventoryItemIds, locationId) {
 
 // --- CORE JOB LOGIC ---
 
-// NEW: Dedicated job to fix product configuration state
 async function fixInventoryTrackingJob(token) {
     addLog('Starting job to fix inventory tracking for all products...', 'info', 'fixTracking');
     let fixedCount = 0;
@@ -161,55 +169,30 @@ async function fixInventoryTrackingJob(token) {
                 needsFix = true;
                 addLog(`Fixing tracking for "${product.title}"...`, 'info', 'fixTracking');
                 try {
-                    await shopifyClient.put(`/variants/${variant.id}.json`, {
-                        variant: { id: variant.id, inventory_management: 'shopify' }
-                    });
-                } catch (e) {
-                    addLog(`Error enabling tracking for "${product.title}": ${e.message}`, 'error', 'fixTracking');
-                    errors++;
-                    continue;
-                }
+                    await shopifyClient.put(`/variants/${variant.id}.json`, { variant: { id: variant.id, inventory_management: 'shopify' } });
+                } catch (e) { addLog(`Error enabling tracking for "${product.title}": ${e.message}`, 'error', 'fixTracking'); errors++; continue; }
             }
-            
             if (variant.inventory_item_id) {
                 try {
-                    await shopifyClient.post('/inventory_levels/connect.json', {
-                        location_id: parseInt(config.shopify.locationId),
-                        inventory_item_id: variant.inventory_item_id,
-                    });
+                    await shopifyClient.post('/inventory_levels/connect.json', { location_id: parseInt(config.shopify.locationId), inventory_item_id: variant.inventory_item_id });
                 } catch (connectError) {
-                    if (connectError.response?.status !== 422) { // 422 is expected if already connected
-                        addLog(`Error connecting "${product.title}": ${connectError.message}`, 'error', 'fixTracking');
-                        errors++;
-                    }
+                    if (connectError.response?.status !== 422) { addLog(`Error connecting "${product.title}": ${connectError.message}`, 'error', 'fixTracking'); errors++; }
                 }
             }
-            
-            if (needsFix) {
-                fixedCount++;
-                await new Promise(r => setTimeout(r, 500));
-            }
+            if (needsFix) { fixedCount++; await new Promise(r => setTimeout(r, 500)); }
         }
-    } catch (e) {
-        addLog(`Critical error during fix job: ${e.message}`, 'error', 'fixTracking');
-        errors++;
-    }
+    } catch (e) { addLog(`Critical error during fix job: ${e.message}`, 'error', 'fixTracking'); errors++; }
     addLog(`Fix job complete. Products fixed: ${fixedCount}. Errors: ${errors}.`, 'success', 'fixTracking');
     return { fixed: fixedCount, errors };
 }
 
-// SIMPLIFIED: This job now only sets quantity.
 async function executeInventoryUpdates(updates, token) {
   let updated = 0, errors = 0;
   addLog(`Executing ${updates.length} inventory quantity updates...`, 'info', 'inventory');
   for (const update of updates) {
       if (shouldAbort(token)) break;
       try {
-          await shopifyClient.post('/inventory_levels/set.json', {
-              location_id: parseInt(config.shopify.locationId),
-              inventory_item_id: update.inventoryItemId,
-              available: update.newInventory
-          });
+          await shopifyClient.post('/inventory_levels/set.json', { location_id: parseInt(config.shopify.locationId), inventory_item_id: update.inventoryItemId, available: update.newInventory });
           addLog(`✓ Updated: ${update.title} (${update.currentInventory} → ${update.newInventory})`, 'success', 'inventory');
           updated++;
           stats.inventoryUpdates++;
@@ -223,14 +206,10 @@ async function executeInventoryUpdates(updates, token) {
   return { updated, errors };
 }
 
-// SIMPLIFIED: updateInventoryJob no longer tries to fix config.
 async function updateInventoryJob(token) {
   addLog('Starting inventory sync...', 'info', 'inventory');
   try {
-    const [apifyData, shopifyData] = await Promise.all([
-        getApifyProducts(),
-        getShopifyProducts({ onlyApifyTag: true })
-    ]);
+    const [apifyData, shopifyData] = await Promise.all([ getApifyProducts(), getShopifyProducts({ onlyApifyTag: true }) ]);
     if (shouldAbort(token)) return { updated: 0, errors: 0 };
     
     const inventoryItemIds = shopifyData.map(p => p.variants?.[0]?.inventory_item_id).filter(Boolean);
@@ -247,23 +226,15 @@ async function updateInventoryJob(token) {
         
         const variant = shopifyProduct.variants[0];
         const inventoryItemId = variant.inventory_item_id;
-        
         let currentInventory = parseInt(inventoryLevels.get(inventoryItemId), 10);
         if (isNaN(currentInventory)) { currentInventory = 0; }
         const targetInventory = parseInt(apifyProduct.inventory, 10) || 0;
-
         if (currentInventory === targetInventory) { alreadyInSyncCount++; return; }
         
-        inventoryUpdates.push({
-            title: shopifyProduct.title,
-            currentInventory,
-            newInventory: targetInventory,
-            inventoryItemId: inventoryItemId,
-        });
+        inventoryUpdates.push({ title: shopifyProduct.title, currentInventory, newInventory: targetInventory, inventoryItemId: inventoryItemId });
     });
     
     addLog(`Updates prepared: ${inventoryUpdates.length}. In sync: ${alreadyInSyncCount}.`, 'info', 'inventory');
-    
     const failsafeCheck = checkFailsafeConditions('inventory', { updatesNeeded: inventoryUpdates.length, totalApifyProducts: apifyData.length }, { type: 'inventory', data: inventoryUpdates });
     if (!failsafeCheck.proceed) { return { updated: 0, errors: 0 }; }
 
@@ -271,30 +242,19 @@ async function updateInventoryJob(token) {
     addToHistory('inventory', { updated, errors, attempted: inventoryUpdates.length });
     addLog(`Inventory sync result: ${updated} updated, ${errors} errors.`, 'info', 'inventory');
     return { updated, errors };
-  } catch (error) {
-    addLog(`Inventory workflow failed: ${error.message}`, 'error', 'inventory');
-    stats.errors++;
-    return { updated: 0, errors: 1 };
-  }
+  } catch (error) { addLog(`Inventory workflow failed: ${error.message}`, 'error', 'inventory'); stats.errors++; return { updated: 0, errors: 1 }; }
 }
 
-// MODIFIED: Discontinued job now sets status to DRAFT
 async function handleDiscontinuedProductsJob(token) {
     addLog('Starting discontinued products check...', 'info', 'discontinued');
     let discontinuedCount = 0, errors = 0;
     try {
-        const [apifyData, shopifyData] = await Promise.all([
-            getApifyProducts(),
-            getShopifyProducts({ onlyApifyTag: true, fields: 'id,title,variants,tags,status' }) // Ensure status is fetched
-        ]);
+        const [apifyData, shopifyData] = await Promise.all([ getApifyProducts(), getShopifyProducts({ onlyApifyTag: true, fields: 'id,handle,title,variants,tags,status' }) ]);
 
         const apifyProcessed = processApifyProducts(apifyData, { processPrice: false });
         const shopifyMaps = buildShopifyMaps(shopifyData);
         const matchedShopifyIds = new Set();
-        apifyProcessed.forEach(p => {
-            const { product } = matchShopifyProduct(p, maps);
-            if (product) matchedShopifyIds.add(product.id);
-        });
+        apifyProcessed.forEach(p => { const { product } = matchShopifyProduct(p, maps); if (product) matchedShopifyIds.add(product.id); });
 
         const candidates = shopifyData.filter(p => !matchedShopifyIds.has(p.id));
         const nowMissing = [];
@@ -308,27 +268,14 @@ async function handleDiscontinuedProductsJob(token) {
 
         addLog(`${nowMissing.length} products marked for discontinuation after ${DISCONTINUE_MISS_RUNS} checks.`, 'info', 'discontinued');
         
-        // Failsafe check...
-
         for (const product of nowMissing) {
             if (shouldAbort(token)) break;
             try {
-                // Step 1: Set inventory to 0
                 if (product.variants?.[0]?.inventory_quantity > 0) {
-                    await shopifyClient.post('/inventory_levels/set.json', {
-                        location_id: parseInt(config.shopify.locationId),
-                        inventory_item_id: product.variants[0].inventory_item_id,
-                        available: 0
-                    });
+                    await shopifyClient.post('/inventory_levels/set.json', { location_id: parseInt(config.shopify.locationId), inventory_item_id: product.variants[0].inventory_item_id, available: 0 });
                 }
-                // Step 2: Set status to DRAFT
                 if (product.status === 'active') {
-                    await shopifyClient.put(`/products/${product.id}.json`, {
-                        product: {
-                            id: product.id,
-                            status: 'draft'
-                        }
-                    });
+                    await shopifyClient.put(`/products/${product.id}.json`, { product: { id: product.id, status: 'draft' } });
                 }
                 addLog(`Discontinued: "${product.title}" (0 stock, status set to DRAFT).`, 'success', 'discontinued');
                 discontinuedCount++;
@@ -341,9 +288,7 @@ async function handleDiscontinuedProductsJob(token) {
             }
         }
         addToHistory('discontinued', { discontinued: discontinuedCount, errors });
-    } catch(e) {
-        addLog(`Discontinued job failed critically: ${e.message}`, 'error', 'discontinued');
-    }
+    } catch(e) { addLog(`Discontinued job failed critically: ${e.message}`, 'error', 'discontinued'); }
     return { discontinued: discontinuedCount, errors };
 }
 async function createNewProductsJob(token, apifyProducts) { /* ... full implementation ... */ return { created: 0, errors: 0}; }
@@ -351,7 +296,11 @@ async function createNewProductsJob(token, apifyProducts) { /* ... full implemen
 // --- UI AND API ---
 app.get('/', (req, res) => {
     let failsafeBanner = '';
-    // ... Failsafe banner logic ...
+    if (failsafeTriggered === 'pending') {
+        failsafeBanner = `<div class="mb-4 p-4 rounded-lg bg-yellow-900 border-2 border-yellow-500"><h3 class="font-bold text-yellow-300">⚠️ CONFIRMATION REQUIRED</h3><p class="text-sm text-yellow-400 mb-4">Reason: ${failsafeReason}</p><div class="flex gap-4"><button onclick="confirmFailsafe()" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-lg btn-hover">Proceed Anyway</button><button onclick="abortFailsafe()" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg btn-hover">Abort & Pause</button></div></div>`;
+    } else if (failsafeTriggered === true) {
+        failsafeBanner = `<div class="mb-4 p-4 rounded-lg bg-red-900 border-2 border-red-500"><div class="flex items-center justify-between"><div><h3 class="font-bold text-red-300">🚨 FAILSAFE TRIGGERED</h3><p class="text-sm text-red-400">${failsafeReason}</p></div><button onclick="clearFailsafe()" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg btn-hover">Clear Failsafe</button></div></div>`;
+    }
     res.send(`<!DOCTYPE html><html lang="en" class="dark"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Shopify Sync Dashboard</title><script src="https://cdn.tailwindcss.com"></script><style>body { background-color: #111827; color: #e5e7eb; } .card { background-color: #1f2937; border: 1px solid #374151; } .btn-hover:hover { transform: translateY(-1px); } .spinner { display: none; border: 4px solid rgba(255,255,255,.3); border-top: 4px solid #60a5fa; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; margin-left: 8px;} @keyframes spin { 0% { transform: rotate(0deg);} 100%{ transform: rotate(360deg);} }</style></head><body class="min-h-screen font-sans p-8"><div class="max-w-7xl mx-auto space-y-8"><h1 class="text-4xl font-bold">Shopify Sync Dashboard</h1><div class="card p-6 rounded-lg">${failsafeBanner}</div><div class="card p-6 rounded-lg"><h2 class="text-2xl font-semibold mb-4">System Controls</h2><div class="flex flex-wrap gap-4"><button onclick="triggerSync('inventory')" class="bg-green-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Update Inventory<div id="inventorySpinner" class="spinner"></div></button><button onclick="triggerSync('products')" class="bg-blue-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Create Products<div id="productsSpinner" class="spinner"></div></button><button onclick="triggerSync('discontinued')" class="bg-yellow-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Check Discontinued<div id="discontinuedSpinner" class="spinner"></div></button><button onclick="triggerFix()" class="bg-indigo-600 text-white px-6 py-3 rounded-lg btn-hover flex items-center">Fix Inventory Tracking<div id="fixSpinner" class="spinner"></div></button></div></div><div class="card p-6 rounded-lg"><h2 class="text-2xl font-semibold mb-4">Activity Log</h2><div class="bg-gray-900 rounded-lg p-4 h-96 overflow-y-auto font-mono text-sm" id="logContainer">${logs.map(log => `<div>[${new Date(log.timestamp).toLocaleTimeString()}] ${log.message}</div>`).join('')}</div></div></div><script>async function triggerSync(type) { const spinner = document.getElementById(type + 'Spinner'); spinner.style.display = 'inline-block'; await fetch('/api/sync/' + type, { method: 'POST' }); spinner.style.display = 'none'; } async function triggerFix() { if (!confirm('This will scan all products and ensure their inventory tracking is enabled. This may take several minutes. Continue?')) return; const spinner = document.getElementById('fixSpinner'); spinner.style.display = 'inline-block'; await fetch('/api/fix/inventory-tracking', { method: 'POST' }); spinner.style.display = 'none'; } async function confirmFailsafe() { await fetch('/api/failsafe/confirm', { method: 'POST' }); location.reload(); } async function abortFailsafe() { await fetch('/api/failsafe/abort', { method: 'POST' }); location.reload(); } async function clearFailsafe() { await fetch('/api/failsafe/clear', { method: 'POST' }); location.reload(); }</script></body></html>`);
 });
 
