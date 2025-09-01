@@ -32,7 +32,7 @@ const DISCONTINUE_MISS_RUNS = Number(process.env.DISCONTINUE_MISS_RUNS || 3);
 const MAX_CREATE_PER_RUN = Number(process.env.MAX_CREATE_PER_RUN || 200);
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '1596350649';
-const config = { apify: { token: process.env.APIFY_TOKEN, actorId: process.env.APIFY_ACTOR_ID || 'autofacts~shopify', baseUrl: 'https://api.apify.com/v2' }, shopify: { domain: process.env.SHOPIFY_DOMAIN, accessToken: process.env.SHOPIFY_ACCESS_TOKEN, locationId: process.env.SHOPIFY_LOCATION_ID, baseUrl: `https://${process.env.SHOPIFY_DOMAIN}/admin/api/2024-01` } };
+const config = { apify: { token: process.env.APIFY_TOKEN, actorId: process.env.APIFY_ACTOR_ID || 'autofacts~shopify', baseUrl: 'https://api.apify.com/v2', urlPrefix: process.env.URL_PREFIX || 'https://www.manchesterwholesale.co.uk/products/' }, shopify: { domain: process.env.SHOPIFY_DOMAIN, accessToken: process.env.SHOPIFY_ACCESS_TOKEN, locationId: process.env.SHOPIFY_LOCATION_ID, baseUrl: `https://${process.env.SHOPIFY_DOMAIN}/admin/api/2024-01` } };
 
 const apifyClient = axios.create({ baseURL: config.apify.baseUrl, timeout: FAILSAFE_LIMITS.FETCH_TIMEOUT });
 const shopifyClient = axios.create({ baseURL: config.shopify.baseUrl, headers: { 'X-Shopify-Access-Token': config.shopify.accessToken, 'Content-Type': 'application/json' }, timeout: FAILSAFE_LIMITS.FETCH_TIMEOUT });
@@ -98,7 +98,6 @@ function checkFailsafeConditions(context, data = {}, actionToConfirm = null) {
 }
 
 // --- Data Fetching & Processing ---
-// AMENDED: Restored full implementation
 async function getApifyProducts() {
     let allItems = [];
     let offset = 0;
@@ -127,7 +126,6 @@ async function getShopifyProducts({ onlyApifyTag = true, fields = 'id,handle,tit
             const response = await shopifyClient.get(url);
             const products = response.data.products;
             allProducts.push(...products);
-            
             const linkHeader = response.headers.link;
             url = null;
             if (linkHeader) {
@@ -135,9 +133,7 @@ async function getShopifyProducts({ onlyApifyTag = true, fields = 'id,handle,tit
                 const nextLink = links.find(s => s.includes('rel="next"'));
                 if (nextLink) {
                     const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
-                    if (pageInfoMatch) {
-                        url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`;
-                    }
+                    if (pageInfoMatch) { url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`; }
                 }
             }
             await new Promise(r => setTimeout(r, 500));
@@ -177,9 +173,42 @@ async function getShopifyInventoryLevels(inventoryItemIds, locationId) {
     addLog(`Fetched ${inventoryMap.size} of ${inventoryItemIds.length} possible inventory levels.`, 'info');
     return inventoryMap;
 }
-function processApifyProducts(apifyData, options = { processPrice: true }) { /* ... your implementation ... */ return apifyData; }
-function buildShopifyMaps(shopifyData) { /* ... your implementation ... */ return new Map(); }
-function matchShopifyProduct(apifyProduct, maps) { /* ... your implementation ... */ return { product: null }; }
+// AMENDED: Restored full implementation
+function normalizeTitle(text = '') { return String(text).toLowerCase().replace(/\b\d{4}\b/g, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
+function normalizeHandle(input, index) { let handle = String(input || `product-${index}`).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, ''); if (!handle || handle === '-' || handle.length < 2) handle = `product-${index}-${Date.now()}`; return handle; }
+function processApifyProducts(apifyData, options = { processPrice: true }) {
+    return apifyData.map((item, index) => {
+        const handle = normalizeHandle(item.handle || item.title, index);
+        let inventory = item.variants?.[0]?.stockQuantity || item.stock || 20;
+        const rawStatus = item.variants?.[0]?.price?.stockStatus || item.stockStatus || item.availability || '';
+        const isOut = String(rawStatus).toLowerCase().includes('out');
+        if (isOut) inventory = 0;
+        return { handle, title: item.title, inventory, sku: item.sku };
+    }).filter(Boolean);
+}
+function buildShopifyMaps(shopifyData) {
+    const handleMap = new Map();
+    const titleMap = new Map();
+    const skuMap = new Map();
+    shopifyData.forEach(product => {
+        handleMap.set(product.handle.toLowerCase(), product);
+        titleMap.set(normalizeTitle(product.title), product);
+        const sku = product.variants?.[0]?.sku;
+        if (sku) skuMap.set(sku.toLowerCase(), product);
+    });
+    return { handleMap, titleMap, skuMap };
+}
+function matchShopifyProduct(apifyProduct, maps) {
+    let product = maps.handleMap.get(apifyProduct.handle.toLowerCase());
+    if (product) return { product, matchType: 'handle' };
+    if (apifyProduct.sku) {
+        const bySku = maps.skuMap.get(apifyProduct.sku.toLowerCase());
+        if (bySku) return { product: bySku, matchType: 'sku' };
+    }
+    const byTitle = maps.titleMap.get(normalizeTitle(apifyProduct.title));
+    if (byTitle) return { product: byTitle, matchType: 'title' };
+    return { product: null, matchType: 'none' };
+}
 
 // --- CORE JOB LOGIC ---
 async function fixInventoryTrackingJob(token) {
@@ -237,19 +266,21 @@ async function updateInventoryJob(token) {
     let alreadyInSyncCount = 0;
     processedProducts.forEach((apifyProduct) => {
         const { product: shopifyProduct } = matchShopifyProduct(apifyProduct, maps);
-        if (!shopifyProduct || !shopifyProduct.variants?.[0]?.inventory_item_id) return;
+        if (!shopifyProduct || !shopifyProduct.variants?.[0]?.inventory_item_id) {
+            mismatches.push({ apifyTitle: apifyProduct.title, apifyHandle: apifyProduct.handle, shopifyHandle: 'NOT FOUND' });
+            return;
+        }
         const inventoryItemId = shopifyProduct.variants[0].inventory_item_id;
         let currentInventory = parseInt(inventoryLevels.get(inventoryItemId), 10);
         if (isNaN(currentInventory)) { currentInventory = 0; }
         const targetInventory = parseInt(apifyProduct.inventory, 10) || 0;
         if (currentInventory === targetInventory) { alreadyInSyncCount++; return; }
         
-        // AMENDED: Added detailed logging for mismatches
-        addLog(`Mismatch for "${shopifyProduct.title}": Shopify Stock = ${currentInventory}, Apify Stock = ${targetInventory}. Queuing update.`, 'warning');
+        addLog(`Mismatch for "${shopifyProduct.title}" (Handle: ${shopifyProduct.handle}): Shopify Stock = ${currentInventory}, Apify Stock = ${targetInventory}. Queuing update.`, 'warning');
 
         inventoryUpdates.push({ title: shopifyProduct.title, currentInventory, newInventory: targetInventory, inventoryItemId: inventoryItemId });
     });
-    addLog(`Updates prepared: ${inventoryUpdates.length}. In sync: ${alreadyInSyncCount}.`, 'info');
+    addLog(`Updates prepared: ${inventoryUpdates.length}. In sync: ${alreadyInSyncCount}. Mismatches: ${mismatches.length}`, 'info');
     if (!checkFailsafeConditions('inventory', { updatesNeeded: inventoryUpdates.length, totalApifyProducts: apifyData.length }, { type: 'inventory', data: inventoryUpdates })) { return; }
     const { updated, errors } = await executeInventoryUpdates(inventoryUpdates, token);
     lastRun.inventory = { updated, errors, at: new Date().toISOString() };
