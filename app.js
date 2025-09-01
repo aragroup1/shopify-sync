@@ -16,9 +16,9 @@ let lastRun = {
 let logs = [];
 let systemPaused = false;
 let mismatches = [];
-let failsafeTriggered = false; // MODIFIED: Can be false, 'pending', or true
+let failsafeTriggered = false;
 let failsafeReason = '';
-let pendingFailsafeAction = null; // NEW: Stores action for confirmation
+let pendingFailsafeAction = null;
 const missingCounters = new Map();
 
 const jobLocks = { inventory: false, products: false, discontinued: false, fixTracking: false };
@@ -98,7 +98,24 @@ function checkFailsafeConditions(context, data = {}, actionToConfirm = null) {
 }
 
 // --- Data Fetching & Processing ---
-async function getApifyProducts() { /* ... full implementation from your trusted version ... */ return []; }
+// AMENDED: Restored full implementation
+async function getApifyProducts() {
+    let allItems = [];
+    let offset = 0;
+    const limit = 1000;
+    addLog('Starting Apify product fetch...', 'info');
+    try {
+        while (true) {
+            const response = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=${limit}&offset=${offset}`);
+            const items = response.data;
+            allItems.push(...items);
+            if (items.length < limit) break;
+            offset += limit;
+        }
+    } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error'); triggerFailsafe(`Apify fetch failed: ${error.message}`); throw error; }
+    addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info');
+    return allItems;
+}
 async function getShopifyProducts({ onlyApifyTag = true, fields = 'id,handle,title,variants,tags,status' } = {}) {
     let allProducts = [];
     let pageNum = 0;
@@ -160,9 +177,9 @@ async function getShopifyInventoryLevels(inventoryItemIds, locationId) {
     addLog(`Fetched ${inventoryMap.size} of ${inventoryItemIds.length} possible inventory levels.`, 'info');
     return inventoryMap;
 }
-function processApifyProducts(apifyData, options = { processPrice: true }) { /* ... implementation from your script ... */ return apifyData; }
-function buildShopifyMaps(shopifyData) { /* ... implementation from your script ... */ return new Map(); }
-function matchShopifyProduct(apifyProduct, maps) { /* ... implementation from your script ... */ return { product: null }; }
+function processApifyProducts(apifyData, options = { processPrice: true }) { /* ... your implementation ... */ return apifyData; }
+function buildShopifyMaps(shopifyData) { /* ... your implementation ... */ return new Map(); }
+function matchShopifyProduct(apifyProduct, maps) { /* ... your implementation ... */ return { product: null }; }
 
 // --- CORE JOB LOGIC ---
 async function fixInventoryTrackingJob(token) {
@@ -226,6 +243,10 @@ async function updateInventoryJob(token) {
         if (isNaN(currentInventory)) { currentInventory = 0; }
         const targetInventory = parseInt(apifyProduct.inventory, 10) || 0;
         if (currentInventory === targetInventory) { alreadyInSyncCount++; return; }
+        
+        // AMENDED: Added detailed logging for mismatches
+        addLog(`Mismatch for "${shopifyProduct.title}": Shopify Stock = ${currentInventory}, Apify Stock = ${targetInventory}. Queuing update.`, 'warning');
+
         inventoryUpdates.push({ title: shopifyProduct.title, currentInventory, newInventory: targetInventory, inventoryItemId: inventoryItemId });
     });
     addLog(`Updates prepared: ${inventoryUpdates.length}. In sync: ${alreadyInSyncCount}.`, 'info');
