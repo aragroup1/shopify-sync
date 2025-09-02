@@ -57,16 +57,15 @@ async function getApifyProducts() { let allItems = []; let offset = 0; addLog('S
 // UPDATED: Fetch all products (active, draft, and archived)
 async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) { 
   let allProducts = []; 
-  let activeCount = 0, draftCount = 0, archivedCount = 0;
-  addLog(`Starting Shopify fetch (including all product statuses)...`, 'info'); 
+  addLog(`Starting Shopify fetch...`, 'info'); 
   
   try { 
-    // Fetch active products
-    let url = `/products.json?limit=250&fields=${fields}&status=active`;
+    // First, fetch all active products (default)
+    let url = `/products.json?limit=250&fields=${fields}`;
+    
     while (url) {
       const response = await shopifyClient.get(url);
       allProducts.push(...response.data.products);
-      activeCount += response.data.products.length;
       
       const linkHeader = response.headers.link;
       url = null;
@@ -74,11 +73,25 @@ async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,stat
         const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
         if (nextLink) {
           const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
-          if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&status=active&page_info=${pageInfoMatch[1]}`;
+          if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`;
         }
       }
       await new Promise(r => setTimeout(r, 500));
     }
+    
+    // Count product statuses
+    const activeCount = allProducts.filter(p => p.status === 'active').length;
+    const draftCount = allProducts.filter(p => p.status === 'draft').length;
+    const archivedCount = allProducts.filter(p => p.status === 'archived').length;
+    
+    addLog(`Shopify fetch complete: ${allProducts.length} total products (${activeCount} active, ${draftCount} draft, ${archivedCount} archived).`, 'info');
+  } catch (error) { 
+    addLog(`Shopify fetch error: ${error.message}`, 'error', error); 
+    throw error; 
+  } 
+  
+  return allProducts; 
+}
     
     // Fetch draft products
     url = `/products.json?limit=250&fields=${fields}&status=draft`;
