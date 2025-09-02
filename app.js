@@ -54,36 +54,45 @@ function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); c
 // --- Data Fetching & Processing ---
 async function getApifyProducts() { let allItems = []; let offset = 0; addLog('Starting Apify product fetch...', 'info'); try { while (true) { const { data } = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=1000&offset=${offset}`); allItems.push(...data); if (data.length < 1000) break; offset += 1000; } } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info'); return allItems; }
 
-// FIXED: Fetch all products (active, draft, and archived) in a single set of calls
+// FIXED: Fetch all products (active, draft, and archived) using separate calls
 async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) {
     let allProducts = [];
     addLog(`Starting Shopify fetch (including active, draft, & archived)...`, 'info');
-    try {
-        let url = `/products.json?limit=250&fields=${fields}&status=active,draft,archived`;
+
+    const fetchByStatus = async (status) => {
+        let products = [];
+        let url = `/products.json?limit=250&fields=${fields}&status=${status}`;
         while (url) {
             const response = await shopifyClient.get(url);
-            allProducts.push(...response.data.products);
-
+            products.push(...response.data.products);
             const linkHeader = response.headers.link;
-            url = null; // Assume we are done unless a "next" link is found
+            url = null;
             if (linkHeader) {
                 const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
                 if (nextLink) {
                     const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
                     if (pageInfoMatch) {
-                        // Construct the next URL from scratch to ensure all parameters are kept
-                        url = `/products.json?limit=250&fields=${fields}&status=active,draft,archived&page_info=${pageInfoMatch[1]}`;
+                        url = `/products.json?limit=250&fields=${fields}&status=${status}&page_info=${pageInfoMatch[1]}`;
                     }
                 }
             }
-            await new Promise(r => setTimeout(r, 500)); // Rate limit delay
+            await new Promise(r => setTimeout(r, 500));
         }
+        return products;
+    };
+
+    try {
+        const activeProducts = await fetchByStatus('active');
+        const draftProducts = await fetchByStatus('draft');
+        const archivedProducts = await fetchByStatus('archived');
+
+        allProducts = [...activeProducts, ...draftProducts, ...archivedProducts];
+        addLog(`Shopify fetch complete: ${allProducts.length} total products (${activeProducts.length} active, ${draftProducts.length} draft, ${archivedProducts.length} archived).`, 'info');
+        return allProducts;
     } catch (error) {
         addLog(`Shopify fetch error: ${error.message}`, 'error', error);
         throw error;
     }
-    addLog(`Shopify fetch complete: ${allProducts.length} total products found.`, 'info');
-    return allProducts;
 }
 
 
@@ -117,7 +126,8 @@ function normalizeForMatching(text = '') {
   return String(text)
     .toLowerCase()
     .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ') // Remove content in parentheses
-    .replace(/\s*```math.*?```\s*/g, ' ') // Remove content in brackets
+    .replace(/\s*```math
+.*?```\s*/g, ' ') // Remove content in brackets
     .replace(/-(parcel|large-letter|letter)-rate$/i, '')
     .replace(/-p\d+$/i, '')
     .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
@@ -205,7 +215,7 @@ async function improvedMapSkusJob(token) {
   };
   
   try { 
-    const [apifyData, shopifyData] = await Promise.all([getShopifyProducts(), getShopifyProducts()]); 
+    const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]); 
     if (shouldAbort(token)) return;
     
     const apifyProcessed = processApifyProducts(apifyData, { processPrice: false }); 
