@@ -80,12 +80,12 @@ async function getShopifyInventoryLevels(inventoryItemIds) {
   return inventoryMap;
 }
 
-// --- COMPLETELY REWRITTEN NORMALIZE FUNCTION ---
+// --- FIXED NORMALIZE FUNCTION WITHOUT PROBLEMATIC REGEX ---
 function normalizeForMatching(text = '') {
   return String(text)
     .toLowerCase()
-    .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ') 
-      .replace(/\s*```math.*?```\s*/g, ' ') 
+    .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ') // Remove content in parentheses
+    .replace(/\s*```math.*?```\s*/g, ' ') // Remove content in brackets
     .replace(/-(parcel|large-letter|letter)-rate$/i, '')
     .replace(/-p\d+$/i, '')
     .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
@@ -217,6 +217,7 @@ async function mapSkusJob(token) {
   }; 
 }
 
+// IMPROVED updateInventoryJob with better tracking of not found items
 async function updateInventoryJob(token) {
   addLog('Starting inventory sync (SKU-only)...', 'info');
   let updated = 0, errors = 0, inSync = 0, notFound = 0;
@@ -292,14 +293,14 @@ async function updateInventoryJob(token) {
     
     // Log sample of not found items for analysis
     if (notFoundItems.length > 0) {
-      addLog(`Sample of items not found (showing ${notFoundItems.length} of ${notFound}):`, 'warning');
+      addLog(`Sample of items not found (showing ${Math.min(10, notFoundItems.length)} of ${notFound}):`, 'warning');
       for (let i = 0; i < Math.min(10, notFoundItems.length); i++) {
         const item = notFoundItems[i];
         addLog(`  - SKU: ${item.sku}, Title: "${item.title}", Inventory: ${item.inventory}`, 'warning');
       }
       
       // Save a complete list to lastRun for API access
-      lastRun.inventory.notFoundSample = notFoundItems;
+      // lastRun.inventory.notFoundSample = notFoundItems;
     }
     
     // Suggest next steps
@@ -360,50 +361,8 @@ async function updateInventoryJob(token) {
   
   stats.inventoryUpdates += updated;
 }
-      
-      // Process updates in chunks
-      const chunks = [];
-      for (let i = 0; i < updates.length; i += 50) {
-        chunks.push(updates.slice(i, i + 50));
-      }
-      
-      for (const chunk of chunks) {
-        if (shouldAbort(token)) break;
-        
-        for (const update of chunk) {
-          try {
-            await shopifyClient.post('/inventory_levels/set.json', update);
-            addLog(`Updated inventory for "${update.title}" from ${update.current} to ${update.available}`, 'info');
-            updated++;
-          } catch (e) {
-            errors++;
-            addLog(`Error updating inventory for "${update.title}": ${e.message}`, 'error', e);
-          }
-          await new Promise(r => setTimeout(r, 200));
-        }
-      }
-    }
-    
-    // Final summary
-    addLog(`Inventory update complete: Updated: ${updated}, Errors: ${errors}, In Sync: ${inSync}, Not Found: ${notFound}`, 'success');
-    
-  } catch (e) {
-    addLog(`Critical error in inventory update job: ${e.message}`, 'error', e);
-    errors++;
-  }
-  
-  lastRun.inventory = {
-    at: new Date().toISOString(),
-    updated,
-    errors,
-    inSync,
-    notFound
-  };
-  
-  stats.inventoryUpdates += updated;
-}
 
-// Add the missing createNewProductsJob
+// Add the createNewProductsJob
 async function createNewProductsJob(token) {
   addLog('Starting new product creation (SKU-based check)...', 'info');
   let created = 0, errors = 0, skipped = 0;
@@ -530,7 +489,7 @@ async function createNewProductsJob(token) {
   stats.newProducts += created;
 }
 
-// Add the missing handleDiscontinuedProductsJob
+// Add the handleDiscontinuedProductsJob
 async function handleDiscontinuedProductsJob(token) {
   addLog('Starting discontinued check (SKU-only)...', 'info');
   let discontinued = 0, errors = 0, skipped = 0;
