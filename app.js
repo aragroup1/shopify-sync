@@ -54,47 +54,44 @@ function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); c
 // --- Data Fetching & Processing ---
 async function getApifyProducts() { let allItems = []; let offset = 0; addLog('Starting Apify product fetch...', 'info'); try { while (true) { const { data } = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=1000&offset=${offset}`); allItems.push(...data); if (data.length < 1000) break; offset += 1000; } } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info'); return allItems; }
 
-// FIXED: Fetch all products (active, draft, and archived) using separate calls
-async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) {
-    let allProducts = [];
-    addLog(`Starting Shopify fetch (including active, draft, & archived)...`, 'info');
-
-    const fetchByStatus = async (status) => {
-        let products = [];
-        let url = `/products.json?limit=250&fields=${fields}&status=${status}`;
-        while (url) {
-            const response = await shopifyClient.get(url);
-            products.push(...response.data.products);
-            const linkHeader = response.headers.link;
-            url = null;
-            if (linkHeader) {
-                const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
-                if (nextLink) {
-                    const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
-                    if (pageInfoMatch) {
-                        url = `/products.json?limit=250&fields=${fields}&status=${status}&page_info=${pageInfoMatch[1]}`;
-                    }
-                }
-            }
-            await new Promise(r => setTimeout(r, 500));
+// FIXED: Simplified Shopify products fetch without status filtering
+async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) { 
+  let allProducts = []; 
+  addLog(`Starting Shopify fetch...`, 'info'); 
+  
+  try { 
+    // Fetch all products (includes active, draft, and archived)
+    let url = `/products.json?limit=250&fields=${fields}`;
+    
+    while (url) {
+      const response = await shopifyClient.get(url);
+      allProducts.push(...response.data.products);
+      
+      const linkHeader = response.headers.link;
+      url = null;
+      if (linkHeader) {
+        const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
+        if (nextLink) {
+          const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
+          if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`;
         }
-        return products;
-    };
-
-    try {
-        const activeProducts = await fetchByStatus('active');
-        const draftProducts = await fetchByStatus('draft');
-        const archivedProducts = await fetchByStatus('archived');
-
-        allProducts = [...activeProducts, ...draftProducts, ...archivedProducts];
-        addLog(`Shopify fetch complete: ${allProducts.length} total products (${activeProducts.length} active, ${draftProducts.length} draft, ${archivedProducts.length} archived).`, 'info');
-        return allProducts;
-    } catch (error) {
-        addLog(`Shopify fetch error: ${error.message}`, 'error', error);
-        throw error;
+      }
+      await new Promise(r => setTimeout(r, 500));
     }
+    
+    // Count products by status
+    const activeCount = allProducts.filter(p => p.status === 'active').length;
+    const draftCount = allProducts.filter(p => p.status === 'draft').length;
+    const archivedCount = allProducts.filter(p => p.status === 'archived').length;
+    
+    addLog(`Shopify fetch complete: ${allProducts.length} total products (${activeCount} active, ${draftCount} draft, ${archivedCount} archived).`, 'info');
+  } catch (error) { 
+    addLog(`Shopify fetch error: ${error.message}`, 'error', error); 
+    throw error; 
+  } 
+  
+  return allProducts; 
 }
-
 
 // Get inventory levels for products
 async function getShopifyInventoryLevels(inventoryItemIds) {
@@ -413,53 +410,55 @@ async function improvedMapSkusJob(token) {
     addLog(`- No match found: ${noMatch}`, 'info');
     
     // Log diagnostic information about unmatched products
-    addLog(`\n===== DIAGNOSTIC INFORMATION FOR UNMATCHED PRODUCTS =====`, 'warning');
-    
-    // Calculate statistics about unmatched products
-    const numericSkuCount = toProcess.filter(p => {
-      const sku = p.variants?.[0]?.sku;
-      return sku && /^\d+$/.test(sku);
-    }).length;
-    
-    const shortTitleCount = toProcess.filter(p => 
-      normalizeForMatching(p.title).length < 10
-    ).length;
-    
-    const noHandleCount = toProcess.filter(p => 
-      !p.handle || p.handle.length < 3
-    ).length;
-    
-    addLog(`Numeric-only SKUs (likely partial SKUs): ${numericSkuCount} (${Math.round(numericSkuCount/noMatch*100)}% of unmatched)`, 'warning');
-    addLog(`Very short titles: ${shortTitleCount} (${Math.round(shortTitleCount/noMatch*100)}% of unmatched)`, 'warning');
-    addLog(`Missing/short handles: ${noHandleCount} (${Math.round(noHandleCount/noMatch*100)}% of unmatched)`, 'warning');
-    
-    // Log examples of unmatched products by category
-    if (unmatchedSamples.badFormat.length > 0) {
-      addLog(`\nProducts with numeric-only SKUs (examples):`, 'warning');
-      unmatchedSamples.badFormat.forEach((item, i) => {
-        addLog(`  ${i+1}. "${item.shopifyTitle}" - Current SKU: ${item.shopifySku} - Best potential match: "${item.bestMatchTitle}" (${item.bestOverlap}% overlap)`, 'warning');
-      });
-    }
-    
-    if (unmatchedSamples.closeMatches.length > 0) {
-      addLog(`\nProducts with close but not matching titles:`, 'warning');
-      unmatchedSamples.closeMatches.forEach((item, i) => {
-        addLog(`  ${i+1}. "${item.shopifyTitle}" - Current SKU: ${item.shopifySku}`, 'warning');
-        const topMatches = item.potentialMatches.sort((a, b) => b.overlap - a.overlap).slice(0, 3);
-        topMatches.forEach((match, j) => {
-          addLog(`     Close match ${j+1}: "${match.title}" (${match.overlap}% overlap) - SKU: ${match.sku}`, 'warning');
+    if (noMatch > 0) {
+      addLog(`\n===== DIAGNOSTIC INFORMATION FOR UNMATCHED PRODUCTS =====`, 'warning');
+      
+      // Calculate statistics about unmatched products
+      const numericSkuCount = toProcess.filter(p => {
+        const sku = p.variants?.[0]?.sku;
+        return sku && /^\d+$/.test(sku);
+      }).length;
+      
+      const shortTitleCount = toProcess.filter(p => 
+        normalizeForMatching(p.title).length < 10
+      ).length;
+      
+      const noHandleCount = toProcess.filter(p => 
+        !p.handle || p.handle.length < 3
+      ).length;
+      
+      addLog(`Numeric-only SKUs (likely partial SKUs): ${numericSkuCount} (${Math.round(numericSkuCount/noMatch*100)}% of unmatched)`, 'warning');
+      addLog(`Very short titles: ${shortTitleCount} (${Math.round(shortTitleCount/noMatch*100)}% of unmatched)`, 'warning');
+      addLog(`Missing/short handles: ${noHandleCount} (${Math.round(noHandleCount/noMatch*100)}% of unmatched)`, 'warning');
+      
+      // Log examples of unmatched products by category
+      if (unmatchedSamples.badFormat.length > 0) {
+        addLog(`\nProducts with numeric-only SKUs (examples):`, 'warning');
+        unmatchedSamples.badFormat.forEach((item, i) => {
+          addLog(`  ${i+1}. "${item.shopifyTitle}" - Current SKU: ${item.shopifySku} - Best potential match: "${item.bestMatchTitle}" (${item.bestOverlap}% overlap)`, 'warning');
         });
-      });
+      }
+      
+      if (unmatchedSamples.closeMatches.length > 0) {
+        addLog(`\nProducts with close but not matching titles:`, 'warning');
+        unmatchedSamples.closeMatches.forEach((item, i) => {
+          addLog(`  ${i+1}. "${item.shopifyTitle}" - Current SKU: ${item.shopifySku}`, 'warning');
+          const topMatches = item.potentialMatches.sort((a, b) => b.overlap - a.overlap).slice(0, 3);
+          topMatches.forEach((match, j) => {
+            addLog(`     Close match ${j+1}: "${match.title}" (${match.overlap}% overlap) - SKU: ${match.sku}`, 'warning');
+          });
+        });
+      }
+      
+      if (unmatchedSamples.noCloseMatches.length > 0) {
+        addLog(`\nProducts with no close matches at all:`, 'warning');
+        unmatchedSamples.noCloseMatches.forEach((item, i) => {
+          addLog(`  ${i+1}. "${item.shopifyTitle}" - Current SKU: ${item.shopifySku}`, 'warning');
+        });
+      }
+      
+      addLog(`\n===== END DIAGNOSTIC INFORMATION =====`, 'warning');
     }
-    
-    if (unmatchedSamples.noCloseMatches.length > 0) {
-      addLog(`\nProducts with no close matches at all:`, 'warning');
-      unmatchedSamples.noCloseMatches.forEach((item, i) => {
-        addLog(`  ${i+1}. "${item.shopifyTitle}" - Current SKU: ${item.shopifySku}`, 'warning');
-      });
-    }
-    
-    addLog(`\n===== END DIAGNOSTIC INFORMATION =====`, 'warning');
     
     // Perform the updates
     if (updateCandidates.length > 0) {
@@ -492,14 +491,6 @@ async function improvedMapSkusJob(token) {
     
     // Final summary
     addLog(`SKU mapping complete: Updated ${updated}, Errors ${errors}, Already matched ${alreadyMatched}, No match ${noMatch}`, 'success');
-    
-    // Save diagnostics for reference
-    lastRun.mapSkus.unmatchedDiagnostics = {
-      numericSkuCount,
-      shortTitleCount,
-      noHandleCount,
-      examples: unmatchedSamples
-    };
     
   } catch (e) {
     addLog(`Critical error in SKU mapping job: ${e.message}`, 'error', e);
