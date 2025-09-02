@@ -53,7 +53,79 @@ function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); c
 
 // --- Data Fetching & Processing ---
 async function getApifyProducts() { let allItems = []; let offset = 0; addLog('Starting Apify product fetch...', 'info'); try { while (true) { const { data } = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=1000&offset=${offset}`); allItems.push(...data); if (data.length < 1000) break; offset += 1000; } } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info'); return allItems; }
-async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) { let allProducts = []; addLog(`Starting Shopify fetch...`, 'info'); try { let url = `/products.json?limit=250&fields=${fields}`; while (url) { const response = await shopifyClient.get(url); allProducts.push(...response.data.products); const linkHeader = response.headers.link; url = null; if (linkHeader) { const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"')); if (nextLink) { const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/); if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`; } } await new Promise(r => setTimeout(r, 500)); } } catch (error) { addLog(`Shopify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Shopify fetch complete: ${allProducts.length} total products.`, 'info'); return allProducts; }
+
+// UPDATED: Fetch all products (active, draft, and archived)
+async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) { 
+  let allProducts = []; 
+  let activeCount = 0, draftCount = 0, archivedCount = 0;
+  addLog(`Starting Shopify fetch (including all product statuses)...`, 'info'); 
+  
+  try { 
+    // Fetch active products
+    let url = `/products.json?limit=250&fields=${fields}&status=active`;
+    while (url) {
+      const response = await shopifyClient.get(url);
+      allProducts.push(...response.data.products);
+      activeCount += response.data.products.length;
+      
+      const linkHeader = response.headers.link;
+      url = null;
+      if (linkHeader) {
+        const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
+        if (nextLink) {
+          const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
+          if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&status=active&page_info=${pageInfoMatch[1]}`;
+        }
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    
+    // Fetch draft products
+    url = `/products.json?limit=250&fields=${fields}&status=draft`;
+    while (url) {
+      const response = await shopifyClient.get(url);
+      allProducts.push(...response.data.products);
+      draftCount += response.data.products.length;
+      
+      const linkHeader = response.headers.link;
+      url = null;
+      if (linkHeader) {
+        const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
+        if (nextLink) {
+          const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
+          if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&status=draft&page_info=${pageInfoMatch[1]}`;
+        }
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    
+    // Fetch archived products
+    url = `/products.json?limit=250&fields=${fields}&status=archived`;
+    while (url) {
+      const response = await shopifyClient.get(url);
+      allProducts.push(...response.data.products);
+      archivedCount += response.data.products.length;
+      
+      const linkHeader = response.headers.link;
+      url = null;
+      if (linkHeader) {
+        const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
+        if (nextLink) {
+          const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
+          if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&status=archived&page_info=${pageInfoMatch[1]}`;
+        }
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    
+  } catch (error) { 
+    addLog(`Shopify fetch error: ${error.message}`, 'error', error); 
+    throw error; 
+  } 
+  
+  addLog(`Shopify fetch complete: ${allProducts.length} total products (${activeCount} active, ${draftCount} draft, ${archivedCount} archived).`, 'info'); 
+  return allProducts; 
+}
 
 // Get inventory levels for products
 async function getShopifyInventoryLevels(inventoryItemIds) {
@@ -80,11 +152,13 @@ async function getShopifyInventoryLevels(inventoryItemIds) {
   return inventoryMap;
 }
 
+// --- FIXED NORMALIZE FUNCTION WITHOUT PROBLEMATIC REGEX ---
 function normalizeForMatching(text = '') {
   return String(text)
     .toLowerCase()
     .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ') // Remove content in parentheses
-    .replace(/\s*```math.*?```\s*/g, ' ') // Remove content in brackets
+    .replace(/\s*```math
+.*?```\s*/g, ' ') // Remove content in brackets
     .replace(/-(parcel|large-letter|letter)-rate$/i, '')
     .replace(/-p\d+$/i, '')
     .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
@@ -155,13 +229,21 @@ async function deduplicateProductsJob(token) {
   lastRun.deduplicate = { at: new Date().toISOString(), deleted: deletedCount, errors }; 
 }
 
-// IMPROVED SKU mapping job with detailed "no match" logging
+// IMPROVED SKU mapping job with detailed debugging for unmatched products
 async function improvedMapSkusJob(token) { 
-  addLog(`--- Starting Comprehensive SKU Mapping Job ---`, 'warning'); 
+  addLog(`--- Starting Comprehensive SKU Mapping Job with Debug Info ---`, 'warning'); 
   let updated = 0, errors = 0, alreadyMatched = 0, noMatch = 0;
   let matchedByHandle = 0, matchedByTitle = 0, matchedByFuzzy = 0;
   let skippedNonSupplier = 0;
-  const unmatchedShopifyProducts = []; // NEW: To store details of unmatched products
+  
+  // Debug info collections
+  const unmatchedSamples = {
+    noHandle: [],
+    shortTitle: [],
+    badFormat: [],
+    closeMatches: [],
+    noCloseMatches: []
+  };
   
   try { 
     const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]); 
@@ -170,10 +252,12 @@ async function improvedMapSkusJob(token) {
     const apifyProcessed = processApifyProducts(apifyData, { processPrice: false }); 
     const apifySkuMap = new Map();
     
+    // Create map of Apify SKUs for quick lookups
     for (const apifyProd of apifyProcessed) {
       apifySkuMap.set(apifyProd.sku.toLowerCase(), apifyProd);
     }
     
+    // Filter Shopify products to only include those with the supplier tag
     const supplierProducts = shopifyData.filter(p => {
       if (!p.tags) return false;
       return p.tags.includes(SUPPLIER_TAG);
@@ -182,6 +266,7 @@ async function improvedMapSkusJob(token) {
     addLog(`Found ${supplierProducts.length} Shopify products with tag '${SUPPLIER_TAG}' to process for SKU mapping.`, 'info');
     skippedNonSupplier = shopifyData.length - supplierProducts.length;
     
+    // First pass: Match by SKU
     const usedShopifyIds = new Set();
     const usedApifySkus = new Set();
     
@@ -199,20 +284,40 @@ async function improvedMapSkusJob(token) {
     
     addLog(`Found ${alreadyMatched} products already correctly mapped by SKU`, 'info');
     
+    // Second pass: Look for products to match by other methods
     const toProcess = supplierProducts.filter(p => !usedShopifyIds.has(p.id));
     const updateCandidates = [];
+    
+    // Track remaining Apify products that don't have a match yet
     const remainingApifyProducts = apifyProcessed.filter(p => !usedApifySkus.has(p.sku.toLowerCase()));
     
     addLog(`Processing ${toProcess.length} products that need SKU mapping...`, 'info');
     
+    // For each remaining product, try to find a match
     for (const shopifyProd of toProcess) {
       if (shouldAbort(token)) break;
+      
+      const shopifyVariant = shopifyProd.variants?.[0];
+      if (!shopifyVariant) continue;
       
       const shopifyNormalizedTitle = normalizeForMatching(shopifyProd.title);
       const shopifyNormalizedHandle = normalizeForMatching(shopifyProd.handle);
       let bestMatch = null;
       let matchType = '';
+      let bestOverlap = 0;
+      let debugInfo = {
+        shopifyTitle: shopifyProd.title,
+        shopifyHandle: shopifyProd.handle,
+        shopifySku: shopifyVariant.sku || '(none)',
+        normalizedTitle: shopifyNormalizedTitle,
+        normalizedHandle: shopifyNormalizedHandle,
+        bestMatchTitle: '',
+        bestMatchSku: '',
+        bestOverlap: 0,
+        potentialMatches: []
+      };
       
+      // Try to match by handle
       for (const apifyProd of remainingApifyProducts) {
         const apifyNormalizedHandle = normalizeForMatching(apifyProd.handle);
         
@@ -220,6 +325,8 @@ async function improvedMapSkusJob(token) {
             shopifyProd.handle.toLowerCase() === apifyProd.handle.toLowerCase()) {
           bestMatch = apifyProd;
           matchType = 'handle';
+          debugInfo.bestMatchTitle = apifyProd.title;
+          debugInfo.bestMatchSku = apifyProd.sku;
           break;
         }
       }
@@ -227,10 +334,13 @@ async function improvedMapSkusJob(token) {
       if (bestMatch) {
         matchedByHandle++;
       } else {
+        // Try to match by title
         for (const apifyProd of remainingApifyProducts) {
           if (shopifyNormalizedTitle === apifyProd.normalizedTitle) {
             bestMatch = apifyProd;
             matchType = 'title';
+            debugInfo.bestMatchTitle = apifyProd.title;
+            debugInfo.bestMatchSku = apifyProd.sku;
             break;
           }
         }
@@ -238,10 +348,30 @@ async function improvedMapSkusJob(token) {
         if (bestMatch) {
           matchedByTitle++;
         } else {
-          let maxOverlap = 70; 
+          // Try fuzzy match as last resort
+          let maxOverlap = 70; // Higher threshold for confidence
           
+          // Find closest matches for debugging
           for (const apifyProd of remainingApifyProducts) {
             const overlap = getWordOverlap(shopifyNormalizedTitle, apifyProd.normalizedTitle);
+            
+            // Track top 3 closest matches for debugging
+            if (overlap > bestOverlap) {
+              bestOverlap = overlap;
+              debugInfo.bestMatchTitle = apifyProd.title;
+              debugInfo.bestMatchSku = apifyProd.sku;
+              debugInfo.bestOverlap = overlap;
+            }
+            
+            if (overlap > 60) {
+              // Store potential close matches for debugging
+              debugInfo.potentialMatches.push({
+                title: apifyProd.title,
+                sku: apifyProd.sku,
+                overlap: Math.round(overlap)
+              });
+            }
+            
             if (overlap > maxOverlap) {
               maxOverlap = overlap;
               bestMatch = apifyProd;
@@ -255,6 +385,7 @@ async function improvedMapSkusJob(token) {
         }
       }
       
+      // If we found a match, prepare to update
       if (bestMatch) {
         const shopifyVariant = shopifyProd.variants?.[0];
         if (!shopifyVariant) continue;
@@ -268,20 +399,43 @@ async function improvedMapSkusJob(token) {
           matchType
         });
         
+        // Remove this Apify product from consideration for future matches
         const index = remainingApifyProducts.findIndex(p => p.sku === bestMatch.sku);
         if (index !== -1) remainingApifyProducts.splice(index, 1);
       } else {
         noMatch++;
-        // NEW: Capture details of the unmatched product
-        unmatchedShopifyProducts.push({
-          id: shopifyProd.id,
-          title: shopifyProd.title,
-          handle: shopifyProd.handle,
-          sku: shopifyProd.variants?.[0]?.sku || '(none)'
-        });
+        
+        // Collect diagnostic information about why it didn't match
+        if (!shopifyProd.handle || shopifyProd.handle.length < 3) {
+          // No/short handle
+          if (unmatchedSamples.noHandle.length < 5) {
+            unmatchedSamples.noHandle.push(debugInfo);
+          }
+        } else if (shopifyNormalizedTitle.length < 10) {
+          // Very short title
+          if (unmatchedSamples.shortTitle.length < 5) {
+            unmatchedSamples.shortTitle.push(debugInfo);
+          }
+        } else if (shopifyVariant.sku && shopifyVariant.sku.match(/^\d+$/)) {
+          // Numeric SKU format - likely just a partial SKU
+          if (unmatchedSamples.badFormat.length < 5) {
+            unmatchedSamples.badFormat.push(debugInfo);
+          }
+        } else if (debugInfo.potentialMatches.length > 0) {
+          // Had close matches but not close enough
+          if (unmatchedSamples.closeMatches.length < 5) {
+            unmatchedSamples.closeMatches.push(debugInfo);
+          }
+        } else {
+          // No close matches at all
+          if (unmatchedSamples.noCloseMatches.length < 5) {
+            unmatchedSamples.noCloseMatches.push(debugInfo);
+          }
+        }
       }
     }
     
+    // Log summary
     addLog(`SKU mapping summary:`, 'info');
     addLog(`- Already matched: ${alreadyMatched}`, 'info');
     addLog(`- To be matched by handle: ${matchedByHandle}`, 'info');
@@ -290,6 +444,56 @@ async function improvedMapSkusJob(token) {
     addLog(`- Total to update: ${updateCandidates.length}`, 'info');
     addLog(`- No match found: ${noMatch}`, 'info');
     
+    // Log diagnostic information about unmatched products
+    addLog(`\n===== DIAGNOSTIC INFORMATION FOR UNMATCHED PRODUCTS =====`, 'warning');
+    
+    // Calculate statistics about unmatched products
+    const numericSkuCount = toProcess.filter(p => {
+      const sku = p.variants?.[0]?.sku;
+      return sku && /^\d+$/.test(sku);
+    }).length;
+    
+    const shortTitleCount = toProcess.filter(p => 
+      normalizeForMatching(p.title).length < 10
+    ).length;
+    
+    const noHandleCount = toProcess.filter(p => 
+      !p.handle || p.handle.length < 3
+    ).length;
+    
+    addLog(`Numeric-only SKUs (likely partial SKUs): ${numericSkuCount} (${Math.round(numericSkuCount/noMatch*100)}% of unmatched)`, 'warning');
+    addLog(`Very short titles: ${shortTitleCount} (${Math.round(shortTitleCount/noMatch*100)}% of unmatched)`, 'warning');
+    addLog(`Missing/short handles: ${noHandleCount} (${Math.round(noHandleCount/noMatch*100)}% of unmatched)`, 'warning');
+    
+    // Log examples of unmatched products by category
+    if (unmatchedSamples.badFormat.length > 0) {
+      addLog(`\nProducts with numeric-only SKUs (examples):`, 'warning');
+      unmatchedSamples.badFormat.forEach((item, i) => {
+        addLog(`  ${i+1}. "${item.shopifyTitle}" - Current SKU: ${item.shopifySku} - Best potential match: "${item.bestMatchTitle}" (${item.bestOverlap}% overlap)`, 'warning');
+      });
+    }
+    
+    if (unmatchedSamples.closeMatches.length > 0) {
+      addLog(`\nProducts with close but not matching titles:`, 'warning');
+      unmatchedSamples.closeMatches.forEach((item, i) => {
+        addLog(`  ${i+1}. "${item.shopifyTitle}" - Current SKU: ${item.shopifySku}`, 'warning');
+        const topMatches = item.potentialMatches.sort((a, b) => b.overlap - a.overlap).slice(0, 3);
+        topMatches.forEach((match, j) => {
+          addLog(`     Close match ${j+1}: "${match.title}" (${match.overlap}% overlap) - SKU: ${match.sku}`, 'warning');
+        });
+      });
+    }
+    
+    if (unmatchedSamples.noCloseMatches.length > 0) {
+      addLog(`\nProducts with no close matches at all:`, 'warning');
+      unmatchedSamples.noCloseMatches.forEach((item, i) => {
+        addLog(`  ${i+1}. "${item.shopifyTitle}" - Current SKU: ${item.shopifySku}`, 'warning');
+      });
+    }
+    
+    addLog(`\n===== END DIAGNOSTIC INFORMATION =====`, 'warning');
+    
+    // Perform the updates
     if (updateCandidates.length > 0) {
       addLog(`Examples of SKUs to update:`, 'warning');
       for (let i = 0; i < Math.min(5, updateCandidates.length); i++) {
@@ -314,21 +518,20 @@ async function improvedMapSkusJob(token) {
           addLog(`Error updating SKU for "${item.title}": ${e.message}`, 'error', e);
         }
         
-        await new Promise(r => setTimeout(r, 500)); 
-      }
-    }
-
-    // NEW: Log details of unmatched products
-    if (unmatchedShopifyProducts.length > 0) {
-      addLog(`Found ${unmatchedShopifyProducts.length} Shopify products that could not be matched to any supplier data.`, 'warning');
-      addLog(`These may be discontinued or have highly mismatched data. Sample:`, 'warning');
-      for (let i = 0; i < Math.min(10, unmatchedShopifyProducts.length); i++) {
-        const item = unmatchedShopifyProducts[i];
-        addLog(`  - Title: "${item.title}", Handle: "${item.handle}", SKU: ${item.sku}`, 'warning');
+        await new Promise(r => setTimeout(r, 500)); // Rate limit
       }
     }
     
+    // Final summary
     addLog(`SKU mapping complete: Updated ${updated}, Errors ${errors}, Already matched ${alreadyMatched}, No match ${noMatch}`, 'success');
+    
+    // Save diagnostics for reference
+    lastRun.mapSkus.unmatchedDiagnostics = {
+      numericSkuCount,
+      shortTitleCount,
+      noHandleCount,
+      examples: unmatchedSamples
+    };
     
   } catch (e) {
     addLog(`Critical error in SKU mapping job: ${e.message}`, 'error', e);
@@ -344,24 +547,26 @@ async function improvedMapSkusJob(token) {
     matchedByHandle,
     matchedByTitle,
     matchedByFuzzy,
-    skippedNonSupplier,
-    unmatchedShopify: unmatchedShopifyProducts.slice(0, 200) // NEW: Store the full list for debugging
+    skippedNonSupplier
   };
 }
 
+// UPDATED: Set products with stock to active status
 async function updateInventoryJob(token) {
   addLog('Starting inventory sync (SKU-only)...', 'info');
   let updated = 0, errors = 0, inSync = 0, notFound = 0;
-  const notFoundItems = []; 
+  let statusChanged = 0;
+  const notFoundItems = []; // Track items not found
   
   try {
     const [apifyData, shopifyData] = await Promise.all([
       getApifyProducts(),
-      getShopifyProducts({ fields: 'id,title,variants,tags,status' })
+      getShopifyProducts()
     ]);
     
     if (shouldAbort(token)) return;
     
+    // Filter for only supplier tag products
     const supplierProducts = shopifyData.filter(p => {
       if (!p.tags) return false;
       return p.tags.includes(SUPPLIER_TAG);
@@ -369,19 +574,27 @@ async function updateInventoryJob(token) {
     
     addLog(`Found ${supplierProducts.length} products with tag '${SUPPLIER_TAG}' out of ${shopifyData.length} total`, 'info');
     
+    // Create SKU map for fast lookups
     const skuMap = new Map();
     for (const product of supplierProducts) {
       const sku = product.variants?.[0]?.sku;
       if (sku) skuMap.set(sku.toLowerCase(), product);
     }
     
+    // Get inventory item IDs for all products
     const inventoryItemIds = supplierProducts
       .map(p => p.variants?.[0]?.inventory_item_id)
       .filter(id => id);
     
+    // Get current inventory levels
     const inventoryLevels = await getShopifyInventoryLevels(inventoryItemIds);
+    
+    // Process Apify products
     const apifyProcessed = processApifyProducts(apifyData, { processPrice: false });
+    
+    // Prepare inventory updates
     const updates = [];
+    const statusUpdates = []; // Track products that need status updates
     
     for (const apifyProd of apifyProcessed) {
       const matchResult = matchShopifyProductBySku(apifyProd, skuMap);
@@ -395,6 +608,7 @@ async function updateInventoryJob(token) {
         const currentInventory = inventoryLevels.get(variant.inventory_item_id) ?? 0;
         const targetInventory = apifyProd.inventory;
         
+        // Check if we need to update inventory
         if (currentInventory === targetInventory) {
           inSync++;
         } else {
@@ -406,9 +620,22 @@ async function updateInventoryJob(token) {
             current: currentInventory
           });
         }
+        
+        // Check if we need to update product status
+        // If inventory > 0, product should be active
+        // If inventory = 0, leave status as is (might be draft from discontinued job)
+        if (targetInventory > 0 && shopifyProd.status !== 'active') {
+          statusUpdates.push({
+            id: shopifyProd.id,
+            title: shopifyProd.title,
+            oldStatus: shopifyProd.status,
+            newStatus: 'active'
+          });
+        }
       } else {
+        // Track unmatched products for analysis
         notFound++;
-        if (notFoundItems.length < 100) { 
+        if (notFoundItems.length < 100) { // Limit to prevent memory issues
           notFoundItems.push({
             title: apifyProd.title,
             sku: apifyProd.sku,
@@ -418,8 +645,10 @@ async function updateInventoryJob(token) {
       }
     }
     
-    addLog(`Inventory Summary: Updates needed: ${updates.length}, In Sync: ${inSync}, Not Found: ${notFound}`, 'info');
+    // Summary before updates
+    addLog(`Inventory Summary: Updates needed: ${updates.length}, Status changes: ${statusUpdates.length}, In Sync: ${inSync}, Not Found: ${notFound}`, 'info');
     
+    // Log sample of not found items for analysis
     if (notFoundItems.length > 0) {
       addLog(`Sample of items not found (showing ${Math.min(10, notFoundItems.length)} of ${notFound}):`, 'warning');
       for (let i = 0; i < Math.min(10, notFoundItems.length); i++) {
@@ -427,11 +656,14 @@ async function updateInventoryJob(token) {
         addLog(`  - SKU: ${item.sku}, Title: "${item.title}", Inventory: ${item.inventory}`, 'warning');
       }
       
+      // Suggest next steps
       addLog(`These ${notFound} products likely need to have their SKUs mapped or be created in your Shopify store.`, 'info');
       addLog(`Try running the "Comprehensive SKU Mapping" job first, then "Sync New Products" for any remaining items.`, 'info');
     }
     
+    // Apply inventory updates in chunks to avoid rate limits
     if (updates.length > 0) {
+      // Failsafe check - don't update too many items at once
       const updatePercentage = (updates.length / supplierProducts.length) * 100;
       
       if (updatePercentage > FAILSAFE_LIMITS.MAX_INVENTORY_UPDATE_PERCENTAGE) {
@@ -440,6 +672,7 @@ async function updateInventoryJob(token) {
         throw new Error(msg);
       }
       
+      // Process updates in chunks
       const chunks = [];
       for (let i = 0; i < updates.length; i += 50) {
         chunks.push(updates.slice(i, i + 50));
@@ -462,7 +695,33 @@ async function updateInventoryJob(token) {
       }
     }
     
-    addLog(`Inventory update complete: Updated: ${updated}, Errors: ${errors}, In Sync: ${inSync}, Not Found: ${notFound}`, 'success');
+    // Apply status updates (activate products with stock)
+    if (statusUpdates.length > 0) {
+      addLog(`Updating status for ${statusUpdates.length} products...`, 'info');
+      
+      for (const update of statusUpdates) {
+        if (shouldAbort(token)) break;
+        
+        try {
+          await shopifyClient.put(`/products/${update.id}.json`, {
+            product: {
+              id: update.id,
+              status: update.newStatus
+            }
+          });
+          addLog(`Updated status for "${update.title}" from ${update.oldStatus} to ${update.newStatus}`, 'success');
+          statusChanged++;
+        } catch (e) {
+          errors++;
+          addLog(`Error updating status for "${update.title}": ${e.message}`, 'error', e);
+        }
+        
+        await new Promise(r => setTimeout(r, 500)); // Rate limit
+      }
+    }
+    
+    // Final summary
+    addLog(`Inventory update complete: Updated: ${updated}, Status Changed: ${statusChanged}, Errors: ${errors}, In Sync: ${inSync}, Not Found: ${notFound}`, 'success');
     
   } catch (e) {
     addLog(`Critical error in inventory update job: ${e.message}`, 'error', e);
@@ -472,15 +731,17 @@ async function updateInventoryJob(token) {
   lastRun.inventory = {
     at: new Date().toISOString(),
     updated,
+    statusChanged,
     errors,
     inSync,
     notFound,
-    notFoundSample: notFoundItems.slice(0, 100) 
+    notFoundSample: notFoundItems.slice(0, 100) // Store sample for reference
   };
   
   stats.inventoryUpdates += updated;
 }
 
+// Add the createNewProductsJob
 async function createNewProductsJob(token) {
   addLog('Starting new product creation (SKU-based check)...', 'info');
   let created = 0, errors = 0, skipped = 0;
@@ -493,25 +754,30 @@ async function createNewProductsJob(token) {
     
     if (shouldAbort(token)) return;
     
+    // Process Apify products with price calculation
     const apifyProcessed = processApifyProducts(apifyData, { processPrice: true });
     
+    // Create SKU map for fast lookups - include all products
     const skuMap = new Map();
     for (const product of shopifyData) {
       const sku = product.variants?.[0]?.sku;
       if (sku) skuMap.set(sku.toLowerCase(), product);
     }
     
+    // Find products to create (not in Shopify yet)
     const toCreate = apifyProcessed.filter(p => !matchShopifyProductBySku(p, skuMap).product);
     
     addLog(`Found ${toCreate.length} new products to create.`, 'info');
     
     if (toCreate.length > 0) {
+      // Failsafe check - don't create too many products at once
       const maxToCreate = Math.min(toCreate.length, FAILSAFE_LIMITS.MAX_NEW_PRODUCTS_AT_ONCE, MAX_CREATE_PER_RUN);
       
       if (toCreate.length > maxToCreate) {
         addLog(`Limiting creation to ${maxToCreate} products out of ${toCreate.length} found.`, 'warning');
       }
       
+      // Create products one by one
       const createdItems = [];
       
       for (let i = 0; i < maxToCreate; i++) {
@@ -520,14 +786,15 @@ async function createNewProductsJob(token) {
         const apifyProd = toCreate[i];
         
         try {
+          // Prepare product data
           const newProduct = {
             product: {
               title: apifyProd.title,
               body_html: apifyProd.body_html || '',
               vendor: 'Imported',
               product_type: '',
-              tags: SUPPLIER_TAG, 
-              status: 'active',
+              tags: SUPPLIER_TAG, // Use the correct supplier tag
+              status: apifyProd.inventory > 0 ? 'active' : 'draft', // Set status based on inventory
               variants: [{
                 price: apifyProd.price,
                 sku: apifyProd.sku,
@@ -537,10 +804,12 @@ async function createNewProductsJob(token) {
             }
           };
           
+          // Create product
           const { data } = await shopifyClient.post('/products.json', newProduct);
           const newProductId = data.product.id;
           const inventoryItemId = data.product.variants[0].inventory_item_id;
           
+          // Set inventory
           await shopifyClient.post('/inventory_levels/set.json', {
             inventory_item_id: inventoryItemId,
             location_id: config.shopify.locationId,
@@ -554,14 +823,14 @@ async function createNewProductsJob(token) {
             sku: apifyProd.sku
           });
           
-          addLog(`Created product: "${apifyProd.title}" with SKU: ${apifyProd.sku}`, 'success');
+          addLog(`Created product: "${apifyProd.title}" with SKU: ${apifyProd.sku} (Status: ${apifyProd.inventory > 0 ? 'active' : 'draft'})`, 'success');
           
         } catch (e) {
           errors++;
           addLog(`Error creating product "${apifyProd.title}": ${e.message}`, 'error', e);
         }
         
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 1000)); // Longer delay for product creation
       }
       
       lastRun.products = {
@@ -599,6 +868,7 @@ async function createNewProductsJob(token) {
   stats.newProducts += created;
 }
 
+// Add the handleDiscontinuedProductsJob
 async function handleDiscontinuedProductsJob(token) {
   addLog('Starting discontinued check (SKU-only)...', 'info');
   let discontinued = 0, errors = 0, skipped = 0;
@@ -611,23 +881,27 @@ async function handleDiscontinuedProductsJob(token) {
     
     if (shouldAbort(token)) return;
     
+    // Get all SKUs from Apify (currently available products)
     const apifySkus = new Set(
       processApifyProducts(apifyData, { processPrice: false })
         .map(p => p.sku.toLowerCase())
     );
     
+    // Find products in Shopify that may be discontinued (not in Apify anymore)
     const potentialDiscontinued = shopifyData.filter(p => {
       const sku = p.variants?.[0]?.sku?.toLowerCase();
+      // Only consider products with the supplier tag and that have a SKU
       return sku && 
              p.tags && 
              p.tags.includes(SUPPLIER_TAG) && 
              !apifySkus.has(sku) &&
-             p.status === 'active'; 
+             p.status === 'active'; // Only consider active products
     });
     
     addLog(`Found ${potentialDiscontinued.length} potential discontinued products.`, 'info');
     
     if (potentialDiscontinued.length > 0) {
+      // Failsafe check - don't discontinue too many products at once
       const discontinuePercentage = (potentialDiscontinued.length / shopifyData.filter(p => p.tags && p.tags.includes(SUPPLIER_TAG)).length) * 100;
       
       if (discontinuePercentage > FAILSAFE_LIMITS.MAX_DISCONTINUE_PERCENTAGE) {
@@ -636,7 +910,10 @@ async function handleDiscontinuedProductsJob(token) {
         throw new Error(msg);
       }
       
+      // Track products that have been discontinued
       const discontinuedItems = [];
+      
+      // Process discontinued products in chunks
       const chunks = [];
       for (let i = 0; i < potentialDiscontinued.length; i += 50) {
         chunks.push(potentialDiscontinued.slice(i, i + 50));
@@ -647,6 +924,7 @@ async function handleDiscontinuedProductsJob(token) {
         
         for (const product of chunk) {
           try {
+            // Set inventory to 0
             const inventoryItemId = product.variants[0].inventory_item_id;
             
             await shopifyClient.post('/inventory_levels/set.json', {
@@ -655,6 +933,7 @@ async function handleDiscontinuedProductsJob(token) {
               available: 0
             });
             
+            // Update product to draft status
             await shopifyClient.put(`/products/${product.id}.json`, {
               product: {
                 id: product.id,
@@ -715,6 +994,7 @@ async function handleDiscontinuedProductsJob(token) {
   stats.discontinued += discontinued;
 }
 
+// Error reporting function
 async function generateAndSendErrorReport() {
   try {
     if (errorSummary.size === 0) {
@@ -755,53 +1035,297 @@ app.get('/', (req, res) => {
       <title>Shopify Sync</title>
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+      <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
       <style>
-        body { padding: 20px; }
-        pre { background: #f8f9fa; padding: 15px; border-radius: 5px; white-space: pre-wrap; word-break: break-all; }
-        .status-badge { font-size: 1.2em; padding: 5px 10px; }
-        .log-entry { margin-bottom: 5px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
-        .log-error { color: #dc3545; }
-        .log-warning { color: #ffc107; }
-        .log-success { color: #198754; }
+        :root {
+          --primary-color: #4361ee;
+          --secondary-color: #3a0ca3;
+          --success-color: #4cc9f0;
+          --warning-color: #f72585;
+          --info-color: #4895ef;
+          --light-color: #f8f9fa;
+          --dark-color: #212529;
+        }
+        
+        body {
+          font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+          background-color: #f7f7f9;
+          color: #333;
+          line-height: 1.6;
+          padding: 0;
+          margin: 0;
+        }
+        
+        .navbar {
+          background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
+          box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+          padding: 1rem 2rem;
+          color: white;
+          margin-bottom: 2rem;
+        }
+        
+        .navbar h1 {
+          margin: 0;
+          font-weight: 700;
+          font-size: 1.5rem;
+        }
+        
+        .card {
+          border: none;
+          border-radius: 12px;
+          box-shadow: 0 5px 15px rgba(0,0,0,0.05);
+          transition: transform 0.3s, box-shadow 0.3s;
+          margin-bottom: 25px;
+          overflow: hidden;
+        }
+        
+        .card:hover {
+          transform: translateY(-5px);
+          box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+        }
+        
+        .card-header {
+          background: white;
+          padding: 1.25rem 1.5rem;
+          font-weight: 600;
+          border-bottom: 1px solid rgba(0,0,0,0.05);
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+        }
+        
+        .card-body {
+          padding: 1.5rem;
+        }
+        
+        .status-badge {
+          font-size: 0.9rem;
+          padding: 0.5rem 1rem;
+          border-radius: 50px;
+          font-weight: 500;
+          text-transform: uppercase;
+          letter-spacing: 0.5px;
+          box-shadow: 0 3px 8px rgba(0,0,0,0.1);
+        }
+        
+        .btn {
+          border-radius: 50px;
+          padding: 0.6rem 1.5rem;
+          font-weight: 500;
+          text-transform: capitalize;
+          letter-spacing: 0.3px;
+          transition: all 0.3s;
+          box-shadow: 0 3px 6px rgba(0,0,0,0.1);
+          margin: 0.25rem;
+        }
+        
+        .btn:hover {
+          transform: translateY(-2px);
+          box-shadow: 0 5px 10px rgba(0,0,0,0.15);
+        }
+        
+        .btn i {
+          margin-right: 5px;
+        }
+        
+        .btn-primary {
+          background: linear-gradient(45deg, var(--primary-color), var(--info-color));
+          border: none;
+        }
+        
+        .btn-warning {
+          background: linear-gradient(45deg, #f72585, #ff9e00);
+          border: none;
+          color: white;
+        }
+        
+        .btn-success {
+          background: linear-gradient(45deg, #06d6a0, #1b9aaa);
+          border: none;
+        }
+        
+        .btn-danger {
+          background: linear-gradient(45deg, #ef476f, #ffd166);
+          border: none;
+        }
+        
+        .btn-secondary {
+          background: linear-gradient(45deg, #8338ec, #3a86ff);
+          border: none;
+          color: white;
+        }
+        
+        .stat-card {
+          padding: 1rem;
+          border-radius: 10px;
+          box-shadow: 0 3px 10px rgba(0,0,0,0.05);
+          background: white;
+          text-align: center;
+          transition: all 0.3s;
+        }
+        
+        .stat-card:hover {
+          transform: translateY(-3px);
+          box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
+        .stat-card h3 {
+          font-size: 2rem;
+          font-weight: 700;
+          margin: 0.5rem 0;
+          background: linear-gradient(45deg, var(--primary-color), var(--info-color));
+          -webkit-background-clip: text;
+          background-clip: text;
+          -webkit-text-fill-color: transparent;
+        }
+        
+        .stat-card p {
+          margin: 0;
+          font-size: 0.9rem;
+          color: #6c757d;
+          font-weight: 500;
+        }
+        
+        .logs-container {
+          max-height: 500px;
+          overflow-y: auto;
+          border-radius: 8px;
+          background: #f8f9fa;
+          padding: 1rem;
+        }
+        
+        .log-entry {
+          padding: 0.75rem 1rem;
+          margin-bottom: 0.5rem;
+          border-radius: 6px;
+          background: white;
+          box-shadow: 0 2px 5px rgba(0,0,0,0.02);
+          border-left: 4px solid #dee2e6;
+          font-size: 0.9rem;
+        }
+        
+        .log-entry small {
+          display: block;
+          font-size: 0.75rem;
+          opacity: 0.7;
+          margin-bottom: 0.25rem;
+        }
+        
+        .log-error {
+          border-left-color: #ef476f;
+          background: #fff5f7;
+        }
+        
+        .log-warning {
+          border-left-color: #ffd166;
+          background: #fff9eb;
+        }
+        
+        .log-success {
+          border-left-color: #06d6a0;
+          background: #f0fff4;
+        }
+        
+        .alert {
+          border-radius: 10px;
+          padding: 1rem 1.5rem;
+          border: none;
+          box-shadow: 0 3px 10px rgba(0,0,0,0.05);
+        }
+        
+        /* Animated background for status */
+        .bg-running {
+          background: linear-gradient(-45deg, #06d6a0, #1b9aaa, #4cc9f0, #3a86ff);
+          background-size: 400% 400%;
+          animation: gradient 3s ease infinite;
+        }
+        
+        .bg-paused {
+          background: linear-gradient(-45deg, #ffd166, #ffbd00, #ff9e00, #ff7700);
+          background-size: 400% 400%;
+          animation: gradient 3s ease infinite;
+        }
+        
+        .bg-failsafe {
+          background: linear-gradient(-45deg, #ef476f, #f72585, #b5179e, #7209b7);
+          background-size: 400% 400%;
+          animation: gradient 3s ease infinite;
+        }
+        
+        @keyframes gradient {
+          0% { background-position: 0% 50%; }
+          50% { background-position: 100% 50%; }
+          100% { background-position: 0% 50%; }
+        }
       </style>
     </head>
     <body>
-      <div class="container-fluid">
-        <h1>Shopify Sync Dashboard</h1>
-        
+      <nav class="navbar">
+        <div class="container-fluid">
+          <h1><i class="fas fa-sync-alt me-2"></i> Shopify Sync Dashboard</h1>
+        </div>
+      </nav>
+      
+      <div class="container">
         <div class="row mb-4">
           <div class="col-md-6">
             <div class="card">
-              <div class="card-header d-flex justify-content-between align-items-center">
-                <h5 class="mb-0">System Status</h5>
-                <span class="badge ${status === 'RUNNING' ? 'bg-success' : (status === 'PAUSED' ? 'bg-warning' : 'bg-danger')} status-badge">${status}</span>
+              <div class="card-header">
+                <h5 class="mb-0"><i class="fas fa-tachometer-alt me-2"></i>System Status</h5>
+                <span class="badge ${status === 'RUNNING' ? 'bg-running' : (status === 'PAUSED' ? 'bg-paused' : 'bg-failsafe')} status-badge">
+                  <i class="fas ${status === 'RUNNING' ? 'fa-play-circle' : (status === 'PAUSED' ? 'fa-pause-circle' : 'fa-exclamation-triangle')} me-1"></i>
+                  ${status}
+                </span>
               </div>
               <div class="card-body">
-                <div class="row">
-                  <div class="col-6">
-                    <p><strong>New Products:</strong> ${stats.newProducts}</p>
-                    <p><strong>Inventory Updates:</strong> ${stats.inventoryUpdates}</p>
+                <div class="row mb-4">
+                  <div class="col-6 col-md-3">
+                    <div class="stat-card">
+                      <p>New Products</p>
+                      <h3>${stats.newProducts}</h3>
+                    </div>
                   </div>
-                  <div class="col-6">
-                    <p><strong>Discontinued:</strong> ${stats.discontinued}</p>
-                    <p><strong>Errors:</strong> ${stats.errors}</p>
+                  <div class="col-6 col-md-3">
+                    <div class="stat-card">
+                      <p>Inventory Updates</p>
+                      <h3>${stats.inventoryUpdates}</h3>
+                    </div>
+                  </div>
+                  <div class="col-6 col-md-3">
+                    <div class="stat-card">
+                      <p>Discontinued</p>
+                      <h3>${stats.discontinued}</h3>
+                    </div>
+                  </div>
+                  <div class="col-6 col-md-3">
+                    <div class="stat-card">
+                      <p>Errors</p>
+                      <h3>${stats.errors}</h3>
+                    </div>
                   </div>
                 </div>
                 
-                <div class="d-flex gap-2 mt-3">
+                <div class="d-flex flex-wrap justify-content-center gap-2 mt-3">
                   ${systemPaused ? 
-                    `<button class="btn btn-success" onclick="fetch('/api/pause', {method: 'POST', body: JSON.stringify({paused: false}), headers: {'Content-Type': 'application/json'}}).then(() => location.reload())">Resume System</button>` : 
-                    `<button class="btn btn-warning" onclick="fetch('/api/pause', {method: 'POST', body: JSON.stringify({paused: true}), headers: {'Content-Type': 'application/json'}}).then(() => location.reload())">Pause System</button>`
+                    `<button class="btn btn-success" onclick="fetch('/api/pause', {method: 'POST', body: JSON.stringify({paused: false}), headers: {'Content-Type': 'application/json'}}).then(() => location.reload())">
+                      <i class="fas fa-play"></i> Resume System
+                    </button>` : 
+                    `<button class="btn btn-warning" onclick="fetch('/api/pause', {method: 'POST', body: JSON.stringify({paused: true}), headers: {'Content-Type': 'application/json'}}).then(() => location.reload())">
+                      <i class="fas fa-pause"></i> Pause System
+                    </button>`
                   }
                   
                   ${failsafeTriggered ? 
-                    `<button class="btn btn-danger" onclick="fetch('/api/failsafe/clear', {method: 'POST'}).then(() => location.reload())">Clear Failsafe</button>` : 
+                    `<button class="btn btn-danger" onclick="fetch('/api/failsafe/clear', {method: 'POST'}).then(() => location.reload())">
+                      <i class="fas fa-exclamation-triangle"></i> Clear Failsafe
+                    </button>` : 
                     ``
                   }
                 </div>
                 
                 ${failsafeTriggered ? 
                   `<div class="alert alert-danger mt-3">
+                    <i class="fas fa-exclamation-circle me-2"></i>
                     <strong>Failsafe triggered:</strong> ${failsafeReason}
                   </div>` : 
                   ``
@@ -813,15 +1337,25 @@ app.get('/', (req, res) => {
           <div class="col-md-6">
             <div class="card">
               <div class="card-header">
-                <h5 class="mb-0">Manual Actions</h5>
+                <h5 class="mb-0"><i class="fas fa-tools me-2"></i>Manual Actions</h5>
               </div>
               <div class="card-body">
-                <div class="d-flex flex-wrap gap-2">
-                  <button class="btn btn-warning" onclick="runSync('improved-map-skus')">Comprehensive SKU Mapping</button>
-                  <button class="btn btn-primary" onclick="runSync('inventory')">Sync Inventory</button>
-                  <button class="btn btn-primary" onclick="runSync('products')">Sync New Products</button>
-                  <button class="btn btn-primary" onclick="runSync('discontinued')">Check Discontinued</button>
-                  <button class="btn btn-secondary" onclick="runSync('deduplicate')">Find & Delete Duplicates</button>
+                <div class="d-flex flex-wrap justify-content-center gap-2">
+                  <button class="btn btn-warning" onclick="runSync('improved-map-skus')">
+                    <i class="fas fa-map-signs"></i> Comprehensive SKU Mapping
+                  </button>
+                  <button class="btn btn-primary" onclick="runSync('inventory')">
+                    <i class="fas fa-boxes"></i> Sync Inventory
+                  </button>
+                  <button class="btn btn-primary" onclick="runSync('products')">
+                    <i class="fas fa-plus-circle"></i> Sync New Products
+                  </button>
+                  <button class="btn btn-primary" onclick="runSync('discontinued')">
+                    <i class="fas fa-archive"></i> Check Discontinued
+                  </button>
+                  <button class="btn btn-secondary" onclick="runSync('deduplicate')">
+                    <i class="fas fa-clone"></i> Find & Delete Duplicates
+                  </button>
                 </div>
               </div>
             </div>
@@ -829,13 +1363,13 @@ app.get('/', (req, res) => {
         </div>
         
         <div class="row">
-          <div class="col-lg-8">
+          <div class="col-md-12">
             <div class="card">
               <div class="card-header">
-                <h5 class="mb-0">Logs</h5>
+                <h5 class="mb-0"><i class="fas fa-list-alt me-2"></i>Logs</h5>
               </div>
               <div class="card-body">
-                <div style="max-height: 500px; overflow-y: auto;">
+                <div class="logs-container">
                   ${logs.map(log => `
                     <div class="log-entry ${log.type === 'error' ? 'log-error' : (log.type === 'warning' ? 'log-warning' : (log.type === 'success' ? 'log-success' : ''))}">
                       <small>${new Date(log.timestamp).toLocaleString()}</small>
@@ -843,16 +1377,6 @@ app.get('/', (req, res) => {
                     </div>
                   `).join('')}
                 </div>
-              </div>
-            </div>
-          </div>
-          <div class="col-lg-4">
-             <div class="card">
-              <div class="card-header">
-                <h5 class="mb-0">Last Run Details</h5>
-              </div>
-              <div class="card-body">
-                 <pre style="max-height: 500px; overflow-y: auto;">${JSON.stringify(lastRun, null, 2)}</pre>
               </div>
             </div>
           </div>
@@ -876,6 +1400,7 @@ app.get('/', (req, res) => {
             });
         }
         
+        // Auto-refresh page every 30 seconds
         setTimeout(() => location.reload(), 30000);
       </script>
     </body>
@@ -893,6 +1418,7 @@ app.post('/api/pause', (req, res) => {
   addLog(`System ${systemPaused ? 'paused' : 'resumed'} by user`, 'warning');
   
   if (!systemPaused) {
+    // Increment abort version to prevent old jobs from continuing
     abortVersion++;
   }
   
@@ -906,7 +1432,7 @@ app.post('/api/failsafe/clear', (req, res) => {
   failsafeTriggered = false;
   failsafeReason = '';
   pendingFailsafeAction = null;
-  abortVersion++; 
+  abortVersion++; // Increment to allow new jobs to start
   
   return res.json({ s: 1 });
 });
@@ -921,6 +1447,7 @@ app.post('/api/failsafe/confirm', (req, res) => {
   
   addLog('Failsafe action confirmed by user', 'warning');
   
+  // Execute the pending action
   action();
   
   return res.json({ s: 1 });
@@ -955,7 +1482,8 @@ app.post('/api/sync/:type', (req, res) => {
   const jobs = {
     inventory: updateInventoryJob,
     products: createNewProductsJob,
-    discontinued: handleDiscontinuedProductsJob
+    discontinued: handleDiscontinuedProductsJob,
+    'improved-map-skus': improvedMapSkusJob
   };
   
   const { type } = req.params;
