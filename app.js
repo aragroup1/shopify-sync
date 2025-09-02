@@ -54,91 +54,38 @@ function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); c
 // --- Data Fetching & Processing ---
 async function getApifyProducts() { let allItems = []; let offset = 0; addLog('Starting Apify product fetch...', 'info'); try { while (true) { const { data } = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=1000&offset=${offset}`); allItems.push(...data); if (data.length < 1000) break; offset += 1000; } } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info'); return allItems; }
 
-// UPDATED: Fetch all products (active, draft, and archived)
-async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) { 
-  let allProducts = []; 
-  addLog(`Starting Shopify fetch...`, 'info'); 
-  
-  try { 
-    // First, fetch all active products (default)
-    let url = `/products.json?limit=250&fields=${fields}`;
-    
-    while (url) {
-      const response = await shopifyClient.get(url);
-      allProducts.push(...response.data.products);
-      
-      const linkHeader = response.headers.link;
-      url = null;
-      if (linkHeader) {
-        const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
-        if (nextLink) {
-          const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
-          if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`;
+// FIXED: Fetch all products (active, draft, and archived) in a single set of calls
+async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) {
+    let allProducts = [];
+    addLog(`Starting Shopify fetch (including active, draft, & archived)...`, 'info');
+    try {
+        let url = `/products.json?limit=250&fields=${fields}&status=active,draft,archived`;
+        while (url) {
+            const response = await shopifyClient.get(url);
+            allProducts.push(...response.data.products);
+
+            const linkHeader = response.headers.link;
+            url = null; // Assume we are done unless a "next" link is found
+            if (linkHeader) {
+                const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
+                if (nextLink) {
+                    const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
+                    if (pageInfoMatch) {
+                        // Construct the next URL from scratch to ensure all parameters are kept
+                        url = `/products.json?limit=250&fields=${fields}&status=active,draft,archived&page_info=${pageInfoMatch[1]}`;
+                    }
+                }
+            }
+            await new Promise(r => setTimeout(r, 500)); // Rate limit delay
         }
-      }
-      await new Promise(r => setTimeout(r, 500));
+    } catch (error) {
+        addLog(`Shopify fetch error: ${error.message}`, 'error', error);
+        throw error;
     }
-    
-    // Count product statuses
-    const activeCount = allProducts.filter(p => p.status === 'active').length;
-    const draftCount = allProducts.filter(p => p.status === 'draft').length;
-    const archivedCount = allProducts.filter(p => p.status === 'archived').length;
-    
-    addLog(`Shopify fetch complete: ${allProducts.length} total products (${activeCount} active, ${draftCount} draft, ${archivedCount} archived).`, 'info');
-  } catch (error) { 
-    addLog(`Shopify fetch error: ${error.message}`, 'error', error); 
-    throw error; 
-  } 
-  
-  return allProducts; 
+    addLog(`Shopify fetch complete: ${allProducts.length} total products found.`, 'info');
+    return allProducts;
 }
-    
-    // Fetch draft products
-    url = `/products.json?limit=250&fields=${fields}&status=draft`;
-    while (url) {
-      const response = await shopifyClient.get(url);
-      allProducts.push(...response.data.products);
-      draftCount += response.data.products.length;
-      
-      const linkHeader = response.headers.link;
-      url = null;
-      if (linkHeader) {
-        const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
-        if (nextLink) {
-          const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
-          if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&status=draft&page_info=${pageInfoMatch[1]}`;
-        }
-      }
-      await new Promise(r => setTimeout(r, 500));
-    }
-    
-    // Fetch archived products
-    url = `/products.json?limit=250&fields=${fields}&status=archived`;
-    while (url) {
-      const response = await shopifyClient.get(url);
-      allProducts.push(...response.data.products);
-      archivedCount += response.data.products.length;
-      
-      const linkHeader = response.headers.link;
-      url = null;
-      if (linkHeader) {
-        const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"'));
-        if (nextLink) {
-          const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/);
-          if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&status=archived&page_info=${pageInfoMatch[1]}`;
-        }
-      }
-      await new Promise(r => setTimeout(r, 500));
-    }
-    
-  } catch (error) { 
-    addLog(`Shopify fetch error: ${error.message}`, 'error', error); 
-    throw error; 
-  } 
-  
-  addLog(`Shopify fetch complete: ${allProducts.length} total products (${activeCount} active, ${draftCount} draft, ${archivedCount} archived).`, 'info'); 
-  return allProducts; 
-}
+
 
 // Get inventory levels for products
 async function getShopifyInventoryLevels(inventoryItemIds) {
@@ -258,7 +205,7 @@ async function improvedMapSkusJob(token) {
   };
   
   try { 
-    const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]); 
+    const [apifyData, shopifyData] = await Promise.all([getShopifyProducts(), getShopifyProducts()]); 
     if (shouldAbort(token)) return;
     
     const apifyProcessed = processApifyProducts(apifyData, { processPrice: false }); 
