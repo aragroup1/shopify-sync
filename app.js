@@ -94,11 +94,10 @@ async function getShopifyInventoryLevels(inventoryItemIds) {
 
 function normalizeForMatching(text = '') {
     if (typeof text !== 'string') return '';
-    return text
+    return text 
         .toLowerCase()
         .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ')       // Removes content in parentheses
-        .replace(/\s*```math
-[\s\S]*?```\s*/g, ' ') // Removes content in brackets (single and multi-line)
+        .replace(/\s*```math [\s\S]*?```\s*/g, ' ') 
         .replace(/-(parcel|large-letter|letter)-rate$/i, '')
         .replace(/-p\d+$/i, '')
         .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
