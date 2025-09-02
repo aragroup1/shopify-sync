@@ -85,8 +85,8 @@ function normalizeForMatching(text = '') {
   return String(text)
     .toLowerCase()
     .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ') // Remove content in parentheses
-    .replace(/\s*```math
-.*?```\s*/g, ' ') // Remove content in brackets
+
+
     .replace(/-(parcel|large-letter|letter)-rate$/i, '')
     .replace(/-p\d+$/i, '')
     .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
