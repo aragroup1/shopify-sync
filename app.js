@@ -14,19 +14,20 @@ let systemPaused = false;
 let failsafeTriggered = false;
 let failsafeReason = '';
 let pendingFailsafeAction = null;
+let failsafeOverride = false;
 const missingCounters = new Map();
 let errorSummary = new Map();
 
 const jobLocks = { inventory: false, products: false, discontinued: false, mapSkus: false, deduplicate: false };
 let abortVersion = 0;
 const getJobToken = () => abortVersion;
-const shouldAbort = (token) => systemPaused || failsafeTriggered || token !== abortVersion;
+const shouldAbort = (token) => systemPaused || (failsafeTriggered && !failsafeOverride) || token !== abortVersion;
 
 // Configuration
 const FAILSAFE_LIMITS = { MAX_INVENTORY_UPDATE_PERCENTAGE: Number(process.env.MAX_INVENTORY_UPDATE_PERCENTAGE || 5), MAX_DISCONTINUE_PERCENTAGE: Number(process.env.MAX_DISCONTINUE_PERCENTAGE || 5), MAX_NEW_PRODUCTS_AT_ONCE: Number(process.env.MAX_NEW_PRODUCTS_AT_ONCE || 100), FETCH_TIMEOUT: Number(process.env.FETCH_TIMEOUT || 300000) };
 const DISCONTINUE_MISS_RUNS = Number(process.env.DISCONTINUE_MISS_RUNS || 3);
 const MAX_CREATE_PER_RUN = Number(process.env.MAX_CREATE_PER_RUN || 200);
-const SUPPLIER_TAG = process.env.SUPPLIER_TAG || 'Supplier:Apify'; // CORRECTED: The proper supplier tag
+const SUPPLIER_TAG = process.env.SUPPLIER_TAG || 'Supplier:Apify';
 const config = { apify: { token: process.env.APIFY_TOKEN, actorId: process.env.APIFY_ACTOR_ID || 'autofacts~shopify', baseUrl: 'https://api.apify.com/v2' }, shopify: { domain: process.env.SHOPIFY_DOMAIN, accessToken: process.env.SHOPIFY_ACCESS_TOKEN, locationId: process.env.SHOPIFY_LOCATION_ID, baseUrl: `https://${process.env.SHOPIFY_DOMAIN}/admin/api/2024-01` } };
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -36,31 +37,106 @@ const shopifyClient = axios.create({ baseURL: config.shopify.baseUrl, headers: {
 
 // --- Helper Functions ---
 function addLog(message, type = 'info', error = null) {
-const log = { timestamp: new Date().toISOString(), message, type };
-logs.unshift(log);
-if (logs.length > 200) logs.length = 200;
-console.log(`[${new Date(log.timestamp).toLocaleTimeString()}] ${message}`);
+  const log = { timestamp: new Date().toISOString(), message, type };
+  logs.unshift(log);
+  if (logs.length > 200) logs.length = 200;
+  console.log(`[${new Date(log.timestamp).toLocaleTimeString()}] ${message}`);
 
-if (type === 'error') {
-stats.errors++;
-let normalizedError = (error?.message || message).replace(/"[^"]+"/g, '"{VAR}"').replace(/\b\d{5,}\b/g, '{ID}');
-errorSummary.set(normalizedError, (errorSummary.get(normalizedError) || 0) + 1);
+  if (type === 'error') {
+    stats.errors++;
+    let normalizedError = (error?.message || message).replace(/"[^"]+"/g, '"{VAR}"').replace(/\b\d{5,}\b/g, '{ID}');
+    errorSummary.set(normalizedError, (errorSummary.get(normalizedError) || 0) + 1);
+  }
 }
+
+async function notifyTelegram(text) { 
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return; 
+  try { 
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { 
+      chat_id: TELEGRAM_CHAT_ID, 
+      text, 
+      parse_mode: 'HTML' 
+    }, { timeout: 15000 }); 
+  } catch (e) { 
+    addLog(`Telegram notify failed: ${e.message}`, 'warning', e); 
+  } 
 }
-async function notifyTelegram(text) { if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return; try { await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, { chat_id: TELEGRAM_CHAT_ID, text, parse_mode: 'HTML' }, { timeout: 15000 }); } catch (e) { addLog(`Telegram notify failed: ${e.message}`, 'warning', e); } }
-function startBackgroundJob(key, name, fn) { if (jobLocks[key]) { addLog(`${name} already running; ignoring duplicate start`, 'warning'); return false; } jobLocks[key] = true; const token = getJobToken(); addLog(`Started background job: ${name}`, 'info'); setImmediate(async () => { try { await fn(token); } catch (e) { addLog(`Unhandled error in ${name}: ${e.message}\n${e.stack}`, 'error', e); } finally { jobLocks[key] = false; addLog(`${name} job finished`, 'info'); } }); return true; }
-function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); const words2 = new Set(str2.split(' ')); const intersection = new Set([...words1].filter(x => words2.has(x))); return (intersection.size / Math.max(words1.size, words2.size)) * 100; }
+
+function triggerFailsafe(reason, action) {
+  if (failsafeOverride) {
+    addLog(`Failsafe would trigger but override is active: ${reason}`, 'warning');
+    return false;
+  }
+  
+  failsafeTriggered = true;
+  failsafeReason = reason;
+  pendingFailsafeAction = action;
+  addLog(`FAILSAFE TRIGGERED: ${reason}`, 'error');
+  notifyTelegram(`⚠️ FAILSAFE TRIGGERED\n\n${reason}\n\nGo to dashboard to proceed or abort.`);
+  return true;
+}
+
+function startBackgroundJob(key, name, fn) { 
+  if (jobLocks[key]) { 
+    addLog(`${name} already running; ignoring duplicate start`, 'warning'); 
+    return false; 
+  } 
+  jobLocks[key] = true; 
+  const token = getJobToken(); 
+  addLog(`Started background job: ${name}`, 'info'); 
+  setImmediate(async () => { 
+    try { 
+      await fn(token); 
+    } catch (e) { 
+      addLog(`Unhandled error in ${name}: ${e.message}\n${e.stack}`, 'error', e); 
+    } finally { 
+      jobLocks[key] = false; 
+      addLog(`${name} job finished`, 'info'); 
+      // Reset failsafe override after job completes
+      if (failsafeOverride) {
+        failsafeOverride = false;
+        failsafeTriggered = false;
+        failsafeReason = '';
+        pendingFailsafeAction = null;
+        addLog('Failsafe override reset after job completion', 'info');
+      }
+    } 
+  }); 
+  return true; 
+}
+
+function getWordOverlap(str1, str2) { 
+  const words1 = new Set(str1.split(' ')); 
+  const words2 = new Set(str2.split(' ')); 
+  const intersection = new Set([...words1].filter(x => words2.has(x))); 
+  return (intersection.size / Math.max(words1.size, words2.size)) * 100; 
+}
 
 // --- Data Fetching & Processing ---
-async function getApifyProducts() { let allItems = []; let offset = 0; addLog('Starting Apify product fetch...', 'info'); try { while (true) { const { data } = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=1000&offset=${offset}`); allItems.push(...data); if (data.length < 1000) break; offset += 1000; } } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info'); return allItems; }
+async function getApifyProducts() { 
+  let allItems = []; 
+  let offset = 0; 
+  addLog('Starting Apify product fetch...', 'info'); 
+  try { 
+    while (true) { 
+      const { data } = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=1000&offset=${offset}`); 
+      allItems.push(...data); 
+      if (data.length < 1000) break; 
+      offset += 1000; 
+    } 
+  } catch (error) { 
+    addLog(`Apify fetch error: ${error.message}`, 'error', error); 
+    throw error; 
+  } 
+  addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info'); 
+  return allItems; 
+}
 
-// FIXED: Simplified Shopify products fetch without status filtering
 async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) { 
   let allProducts = []; 
   addLog(`Starting Shopify fetch...`, 'info'); 
   
   try { 
-    // Fetch all products (includes active, draft, and archived)
     let url = `/products.json?limit=250&fields=${fields}`;
     
     while (url) {
@@ -79,7 +155,6 @@ async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,stat
       await new Promise(r => setTimeout(r, 500));
     }
     
-    // Count products by status
     const activeCount = allProducts.filter(p => p.status === 'active').length;
     const draftCount = allProducts.filter(p => p.status === 'draft').length;
     const archivedCount = allProducts.filter(p => p.status === 'archived').length;
@@ -93,7 +168,6 @@ async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,stat
   return allProducts; 
 }
 
-// Get inventory levels for products
 async function getShopifyInventoryLevels(inventoryItemIds) {
   const inventoryMap = new Map();
   if (!inventoryItemIds.length) return inventoryMap;
@@ -118,12 +192,13 @@ async function getShopifyInventoryLevels(inventoryItemIds) {
   return inventoryMap;
 }
 
-// --- FIXED NORMALIZE FUNCTION WITHOUT PROBLEMATIC REGEX ---
+// --- FIXED NORMALIZE FUNCTION ---
 function normalizeForMatching(text = '') {
   return String(text)
     .toLowerCase()
     .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ') // Remove content in parentheses
-    .replace(/\s*```math.*?```\s*/g, ' ') // Remove content in brackets
+    .replace(/\s*```math
+.*?```\s*/g, ' ') // Remove content in brackets
     .replace(/-(parcel|large-letter|letter)-rate$/i, '')
     .replace(/-p\d+$/i, '')
     .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
@@ -132,11 +207,74 @@ function normalizeForMatching(text = '') {
     .trim();
 }
 
-function calculateRetailPrice(supplierCostString) { const cost = parseFloat(supplierCostString); if (isNaN(cost) || cost < 0) return '0.00'; let finalPrice; if (cost <= 1) finalPrice = cost + 5.5; else if (cost <= 2) finalPrice = cost + 5.95; else if (cost <= 3) finalPrice = cost + 6.99; else if (cost <= 5) finalPrice = cost * 3.2; else if (cost <= 7) finalPrice = cost * 2.5; else if (cost <= 9) finalPrice = cost * 2.2; else if (cost <= 12) finalPrice = cost * 2; else if (cost <= 20) finalPrice = cost * 1.9; else finalPrice = cost * 1.8; return finalPrice.toFixed(2); }
-function processApifyProducts(apifyData, { processPrice = true } = {}) { return apifyData.map(item => { if (!item || !item.title) return null; const handle = normalizeForMatching(item.handle || item.title).replace(/ /g, '-'); let inventory = item.variants?.[0]?.stockQuantity || item.stock || 20; if (String(item.variants?.[0]?.price?.stockStatus || item.stockStatus || item.availability || '').toLowerCase().includes('out')) inventory = 0; let sku = item.sku || item.variants?.[0]?.sku || ''; let price = '0.00'; if (item.variants?.[0]?.price?.value) { price = String(item.variants[0].price.value); if (processPrice) price = calculateRetailPrice(price); } const body_html = item.description || item.bodyHtml || ''; const images = item.images ? item.images.map(img => ({ src: img.src || img.url })).filter(img => img.src) : []; return { handle, title: item.title, inventory, sku, price, body_html, images, normalizedTitle: normalizeForMatching(item.title) }; }).filter(p => p && p.sku); }
-function buildShopifyMaps(shopifyData) { const skuMap = new Map(); const strippedHandleMap = new Map(); const normalizedTitleMap = new Map(); for (const product of shopifyData) { const sku = product.variants?.[0]?.sku; if (sku) skuMap.set(sku.toLowerCase(), product); strippedHandleMap.set(normalizeForMatching(product.handle).replace(/ /g, '-'), product); normalizedTitleMap.set(normalizeForMatching(product.title), product); } return { skuMap, strippedHandleMap, normalizedTitleMap, all: shopifyData }; }
-function findBestMatch(apifyProduct, shopifyMaps) { if (shopifyMaps.skuMap.has(apifyProduct.sku.toLowerCase())) return { product: shopifyMaps.skuMap.get(apifyProduct.sku.toLowerCase()), matchType: 'sku' }; if (shopifyMaps.strippedHandleMap.has(apifyProduct.handle)) return { product: shopifyMaps.strippedHandleMap.get(apifyProduct.handle), matchType: 'handle' }; if (shopifyMaps.normalizedTitleMap.has(apifyProduct.normalizedTitle)) return { product: shopifyMaps.normalizedTitleMap.get(apifyProduct.normalizedTitle), matchType: 'title' }; let bestTitleMatch = null; let maxOverlap = 60; for (const shopifyProduct of shopifyMaps.all) { const overlap = getWordOverlap(apifyProduct.normalizedTitle, normalizeForMatching(shopifyProduct.title)); if (overlap > maxOverlap) { maxOverlap = overlap; bestTitleMatch = shopifyProduct; } } if (bestTitleMatch) return { product: bestTitleMatch, matchType: `title-fuzzy-${Math.round(maxOverlap)}%` }; return { product: null, matchType: 'none' }; }
-function matchShopifyProductBySku(apifyProduct, skuMap) { const product = skuMap.get(apifyProduct.sku.toLowerCase()); return product ? { product, matchType: 'sku' } : { product: null, matchType: 'none' }; }
+function calculateRetailPrice(supplierCostString) { 
+  const cost = parseFloat(supplierCostString); 
+  if (isNaN(cost) || cost < 0) return '0.00'; 
+  let finalPrice; 
+  if (cost <= 1) finalPrice = cost + 5.5; 
+  else if (cost <= 2) finalPrice = cost + 5.95; 
+  else if (cost <= 3) finalPrice = cost + 6.99; 
+  else if (cost <= 5) finalPrice = cost * 3.2; 
+  else if (cost <= 7) finalPrice = cost * 2.5; 
+  else if (cost <= 9) finalPrice = cost * 2.2; 
+  else if (cost <= 12) finalPrice = cost * 2; 
+  else if (cost <= 20) finalPrice = cost * 1.9; 
+  else finalPrice = cost * 1.8; 
+  return finalPrice.toFixed(2); 
+}
+
+function processApifyProducts(apifyData, { processPrice = true } = {}) { 
+  return apifyData.map(item => { 
+    if (!item || !item.title) return null; 
+    const handle = normalizeForMatching(item.handle || item.title).replace(/ /g, '-'); 
+    let inventory = item.variants?.[0]?.stockQuantity || item.stock || 20; 
+    if (String(item.variants?.[0]?.price?.stockStatus || item.stockStatus || item.availability || '').toLowerCase().includes('out')) inventory = 0; 
+    let sku = item.sku || item.variants?.[0]?.sku || ''; 
+    let price = '0.00'; 
+    if (item.variants?.[0]?.price?.value) { 
+      price = String(item.variants[0].price.value); 
+      if (processPrice) price = calculateRetailPrice(price); 
+    } 
+    const body_html = item.description || item.bodyHtml || ''; 
+    const images = item.images ? item.images.map(img => ({ src: img.src || img.url })).filter(img => img.src) : []; 
+    return { handle, title: item.title, inventory, sku, price, body_html, images, normalizedTitle: normalizeForMatching(item.title) }; 
+  }).filter(p => p && p.sku); 
+}
+
+function buildShopifyMaps(shopifyData) { 
+  const skuMap = new Map(); 
+  const strippedHandleMap = new Map(); 
+  const normalizedTitleMap = new Map(); 
+  for (const product of shopifyData) { 
+    const sku = product.variants?.[0]?.sku; 
+    if (sku) skuMap.set(sku.toLowerCase(), product); 
+    strippedHandleMap.set(normalizeForMatching(product.handle).replace(/ /g, '-'), product); 
+    normalizedTitleMap.set(normalizeForMatching(product.title), product); 
+  } 
+  return { skuMap, strippedHandleMap, normalizedTitleMap, all: shopifyData }; 
+}
+
+function findBestMatch(apifyProduct, shopifyMaps) { 
+  if (shopifyMaps.skuMap.has(apifyProduct.sku.toLowerCase())) return { product: shopifyMaps.skuMap.get(apifyProduct.sku.toLowerCase()), matchType: 'sku' }; 
+  if (shopifyMaps.strippedHandleMap.has(apifyProduct.handle)) return { product: shopifyMaps.strippedHandleMap.get(apifyProduct.handle), matchType: 'handle' }; 
+  if (shopifyMaps.normalizedTitleMap.has(apifyProduct.normalizedTitle)) return { product: shopifyMaps.normalizedTitleMap.get(apifyProduct.normalizedTitle), matchType: 'title' }; 
+  let bestTitleMatch = null; 
+  let maxOverlap = 60; 
+  for (const shopifyProduct of shopifyMaps.all) { 
+    const overlap = getWordOverlap(apifyProduct.normalizedTitle, normalizeForMatching(shopifyProduct.title)); 
+    if (overlap > maxOverlap) { 
+      maxOverlap = overlap; 
+      bestTitleMatch = shopifyProduct; 
+    } 
+  } 
+  if (bestTitleMatch) return { product: bestTitleMatch, matchType: `title-fuzzy-${Math.round(maxOverlap)}%` }; 
+  return { product: null, matchType: 'none' }; 
+}
+
+function matchShopifyProductBySku(apifyProduct, skuMap) { 
+  const product = skuMap.get(apifyProduct.sku.toLowerCase()); 
+  return product ? { product, matchType: 'sku' } : { product: null, matchType: 'none' }; 
+}
 
 // --- CORE JOB LOGIC ---
 async function deduplicateProductsJob(token) { 
@@ -194,14 +332,12 @@ async function deduplicateProductsJob(token) {
   lastRun.deduplicate = { at: new Date().toISOString(), deleted: deletedCount, errors }; 
 }
 
-// IMPROVED SKU mapping job with detailed debugging for unmatched products
 async function improvedMapSkusJob(token) { 
   addLog(`--- Starting Comprehensive SKU Mapping Job with Debug Info ---`, 'warning'); 
   let updated = 0, errors = 0, alreadyMatched = 0, noMatch = 0;
   let matchedByHandle = 0, matchedByTitle = 0, matchedByFuzzy = 0;
   let skippedNonSupplier = 0;
   
-  // Debug info collections
   const unmatchedSamples = {
     noHandle: [],
     shortTitle: [],
@@ -217,12 +353,10 @@ async function improvedMapSkusJob(token) {
     const apifyProcessed = processApifyProducts(apifyData, { processPrice: false }); 
     const apifySkuMap = new Map();
     
-    // Create map of Apify SKUs for quick lookups
     for (const apifyProd of apifyProcessed) {
       apifySkuMap.set(apifyProd.sku.toLowerCase(), apifyProd);
     }
     
-    // Filter Shopify products to only include those with the supplier tag
     const supplierProducts = shopifyData.filter(p => {
       if (!p.tags) return false;
       return p.tags.includes(SUPPLIER_TAG);
@@ -231,7 +365,6 @@ async function improvedMapSkusJob(token) {
     addLog(`Found ${supplierProducts.length} Shopify products with tag '${SUPPLIER_TAG}' to process for SKU mapping.`, 'info');
     skippedNonSupplier = shopifyData.length - supplierProducts.length;
     
-    // First pass: Match by SKU
     const usedShopifyIds = new Set();
     const usedApifySkus = new Set();
     
@@ -249,16 +382,13 @@ async function improvedMapSkusJob(token) {
     
     addLog(`Found ${alreadyMatched} products already correctly mapped by SKU`, 'info');
     
-    // Second pass: Look for products to match by other methods
     const toProcess = supplierProducts.filter(p => !usedShopifyIds.has(p.id));
     const updateCandidates = [];
     
-    // Track remaining Apify products that don't have a match yet
     const remainingApifyProducts = apifyProcessed.filter(p => !usedApifySkus.has(p.sku.toLowerCase()));
     
     addLog(`Processing ${toProcess.length} products that need SKU mapping...`, 'info');
     
-    // For each remaining product, try to find a match
     for (const shopifyProd of toProcess) {
       if (shouldAbort(token)) break;
       
@@ -282,7 +412,6 @@ async function improvedMapSkusJob(token) {
         potentialMatches: []
       };
       
-      // Try to match by handle
       for (const apifyProd of remainingApifyProducts) {
         const apifyNormalizedHandle = normalizeForMatching(apifyProd.handle);
         
@@ -299,7 +428,6 @@ async function improvedMapSkusJob(token) {
       if (bestMatch) {
         matchedByHandle++;
       } else {
-        // Try to match by title
         for (const apifyProd of remainingApifyProducts) {
           if (shopifyNormalizedTitle === apifyProd.normalizedTitle) {
             bestMatch = apifyProd;
@@ -313,14 +441,11 @@ async function improvedMapSkusJob(token) {
         if (bestMatch) {
           matchedByTitle++;
         } else {
-          // Try fuzzy match as last resort
-          let maxOverlap = 70; // Higher threshold for confidence
+          let maxOverlap = 70;
           
-          // Find closest matches for debugging
           for (const apifyProd of remainingApifyProducts) {
             const overlap = getWordOverlap(shopifyNormalizedTitle, apifyProd.normalizedTitle);
             
-            // Track top 3 closest matches for debugging
             if (overlap > bestOverlap) {
               bestOverlap = overlap;
               debugInfo.bestMatchTitle = apifyProd.title;
@@ -329,7 +454,6 @@ async function improvedMapSkusJob(token) {
             }
             
             if (overlap > 60) {
-              // Store potential close matches for debugging
               debugInfo.potentialMatches.push({
                 title: apifyProd.title,
                 sku: apifyProd.sku,
@@ -350,7 +474,6 @@ async function improvedMapSkusJob(token) {
         }
       }
       
-      // If we found a match, prepare to update
       if (bestMatch) {
         const shopifyVariant = shopifyProd.variants?.[0];
         if (!shopifyVariant) continue;
@@ -364,35 +487,28 @@ async function improvedMapSkusJob(token) {
           matchType
         });
         
-        // Remove this Apify product from consideration for future matches
         const index = remainingApifyProducts.findIndex(p => p.sku === bestMatch.sku);
         if (index !== -1) remainingApifyProducts.splice(index, 1);
       } else {
         noMatch++;
         
-        // Collect diagnostic information about why it didn't match
         if (!shopifyProd.handle || shopifyProd.handle.length < 3) {
-          // No/short handle
           if (unmatchedSamples.noHandle.length < 5) {
             unmatchedSamples.noHandle.push(debugInfo);
           }
         } else if (shopifyNormalizedTitle.length < 10) {
-          // Very short title
           if (unmatchedSamples.shortTitle.length < 5) {
             unmatchedSamples.shortTitle.push(debugInfo);
           }
         } else if (shopifyVariant.sku && shopifyVariant.sku.match(/^\d+$/)) {
-          // Numeric SKU format - likely just a partial SKU
           if (unmatchedSamples.badFormat.length < 5) {
             unmatchedSamples.badFormat.push(debugInfo);
           }
         } else if (debugInfo.potentialMatches.length > 0) {
-          // Had close matches but not close enough
           if (unmatchedSamples.closeMatches.length < 5) {
             unmatchedSamples.closeMatches.push(debugInfo);
           }
         } else {
-          // No close matches at all
           if (unmatchedSamples.noCloseMatches.length < 5) {
             unmatchedSamples.noCloseMatches.push(debugInfo);
           }
@@ -400,7 +516,6 @@ async function improvedMapSkusJob(token) {
       }
     }
     
-    // Log summary
     addLog(`SKU mapping summary:`, 'info');
     addLog(`- Already matched: ${alreadyMatched}`, 'info');
     addLog(`- To be matched by handle: ${matchedByHandle}`, 'info');
@@ -409,11 +524,9 @@ async function improvedMapSkusJob(token) {
     addLog(`- Total to update: ${updateCandidates.length}`, 'info');
     addLog(`- No match found: ${noMatch}`, 'info');
     
-    // Log diagnostic information about unmatched products
     if (noMatch > 0) {
       addLog(`\n===== DIAGNOSTIC INFORMATION FOR UNMATCHED PRODUCTS =====`, 'warning');
       
-      // Calculate statistics about unmatched products
       const numericSkuCount = toProcess.filter(p => {
         const sku = p.variants?.[0]?.sku;
         return sku && /^\d+$/.test(sku);
@@ -431,7 +544,6 @@ async function improvedMapSkusJob(token) {
       addLog(`Very short titles: ${shortTitleCount} (${Math.round(shortTitleCount/noMatch*100)}% of unmatched)`, 'warning');
       addLog(`Missing/short handles: ${noHandleCount} (${Math.round(noHandleCount/noMatch*100)}% of unmatched)`, 'warning');
       
-      // Log examples of unmatched products by category
       if (unmatchedSamples.badFormat.length > 0) {
         addLog(`\nProducts with numeric-only SKUs (examples):`, 'warning');
         unmatchedSamples.badFormat.forEach((item, i) => {
@@ -460,7 +572,6 @@ async function improvedMapSkusJob(token) {
       addLog(`\n===== END DIAGNOSTIC INFORMATION =====`, 'warning');
     }
     
-    // Perform the updates
     if (updateCandidates.length > 0) {
       addLog(`Examples of SKUs to update:`, 'warning');
       for (let i = 0; i < Math.min(5, updateCandidates.length); i++) {
@@ -485,11 +596,10 @@ async function improvedMapSkusJob(token) {
           addLog(`Error updating SKU for "${item.title}": ${e.message}`, 'error', e);
         }
         
-        await new Promise(r => setTimeout(r, 500)); // Rate limit
+        await new Promise(r => setTimeout(r, 500));
       }
     }
     
-    // Final summary
     addLog(`SKU mapping complete: Updated ${updated}, Errors ${errors}, Already matched ${alreadyMatched}, No match ${noMatch}`, 'success');
     
   } catch (e) {
@@ -510,12 +620,11 @@ async function improvedMapSkusJob(token) {
   };
 }
 
-// UPDATED: Set products with stock to active status
 async function updateInventoryJob(token) {
   addLog('Starting inventory sync (SKU-only)...', 'info');
   let updated = 0, errors = 0, inSync = 0, notFound = 0;
   let statusChanged = 0;
-  const notFoundItems = []; // Track items not found
+  const notFoundItems = [];
   
   try {
     const [apifyData, shopifyData] = await Promise.all([
@@ -525,7 +634,6 @@ async function updateInventoryJob(token) {
     
     if (shouldAbort(token)) return;
     
-    // Filter for only supplier tag products
     const supplierProducts = shopifyData.filter(p => {
       if (!p.tags) return false;
       return p.tags.includes(SUPPLIER_TAG);
@@ -533,27 +641,22 @@ async function updateInventoryJob(token) {
     
     addLog(`Found ${supplierProducts.length} products with tag '${SUPPLIER_TAG}' out of ${shopifyData.length} total`, 'info');
     
-    // Create SKU map for fast lookups
     const skuMap = new Map();
     for (const product of supplierProducts) {
       const sku = product.variants?.[0]?.sku;
       if (sku) skuMap.set(sku.toLowerCase(), product);
     }
     
-    // Get inventory item IDs for all products
     const inventoryItemIds = supplierProducts
       .map(p => p.variants?.[0]?.inventory_item_id)
       .filter(id => id);
     
-    // Get current inventory levels
     const inventoryLevels = await getShopifyInventoryLevels(inventoryItemIds);
     
-    // Process Apify products
     const apifyProcessed = processApifyProducts(apifyData, { processPrice: false });
     
-    // Prepare inventory updates
     const updates = [];
-    const statusUpdates = []; // Track products that need status updates
+    const statusUpdates = [];
     
     for (const apifyProd of apifyProcessed) {
       const matchResult = matchShopifyProductBySku(apifyProd, skuMap);
@@ -567,7 +670,6 @@ async function updateInventoryJob(token) {
         const currentInventory = inventoryLevels.get(variant.inventory_item_id) ?? 0;
         const targetInventory = apifyProd.inventory;
         
-        // Check if we need to update inventory
         if (currentInventory === targetInventory) {
           inSync++;
         } else {
@@ -580,9 +682,6 @@ async function updateInventoryJob(token) {
           });
         }
         
-        // Check if we need to update product status
-        // If inventory > 0, product should be active
-        // If inventory = 0, leave status as is (might be draft from discontinued job)
         if (targetInventory > 0 && shopifyProd.status !== 'active') {
           statusUpdates.push({
             id: shopifyProd.id,
@@ -592,9 +691,8 @@ async function updateInventoryJob(token) {
           });
         }
       } else {
-        // Track unmatched products for analysis
         notFound++;
-        if (notFoundItems.length < 100) { // Limit to prevent memory issues
+        if (notFoundItems.length < 100) {
           notFoundItems.push({
             title: apifyProd.title,
             sku: apifyProd.sku,
@@ -604,10 +702,8 @@ async function updateInventoryJob(token) {
       }
     }
     
-    // Summary before updates
     addLog(`Inventory Summary: Updates needed: ${updates.length}, Status changes: ${statusUpdates.length}, In Sync: ${inSync}, Not Found: ${notFound}`, 'info');
     
-    // Log sample of not found items for analysis
     if (notFoundItems.length > 0) {
       addLog(`Sample of items not found (showing ${Math.min(10, notFoundItems.length)} of ${notFound}):`, 'warning');
       for (let i = 0; i < Math.min(10, notFoundItems.length); i++) {
@@ -615,23 +711,41 @@ async function updateInventoryJob(token) {
         addLog(`  - SKU: ${item.sku}, Title: "${item.title}", Inventory: ${item.inventory}`, 'warning');
       }
       
-      // Suggest next steps
       addLog(`These ${notFound} products likely need to have their SKUs mapped or be created in your Shopify store.`, 'info');
       addLog(`Try running the "Comprehensive SKU Mapping" job first, then "Sync New Products" for any remaining items.`, 'info');
     }
     
-    // Apply inventory updates in chunks to avoid rate limits
     if (updates.length > 0) {
-      // Failsafe check - don't update too many items at once
       const updatePercentage = (updates.length / supplierProducts.length) * 100;
       
-      if (updatePercentage > FAILSAFE_LIMITS.MAX_INVENTORY_UPDATE_PERCENTAGE) {
-        const msg = `Inventory update percentage (${updatePercentage.toFixed(1)}%) exceeds failsafe limit (${FAILSAFE_LIMITS.MAX_INVENTORY_UPDATE_PERCENTAGE}%)`;
-        addLog(msg, 'error');
-        throw new Error(msg);
+      if (updatePercentage > FAILSAFE_LIMITS.MAX_INVENTORY_UPDATE_PERCENTAGE && !failsafeOverride) {
+        const msg = `Inventory update percentage (${updatePercentage.toFixed(1)}%) exceeds failsafe limit (${FAILSAFE_LIMITS.MAX_INVENTORY_UPDATE_PERCENTAGE}%). ${updates.length} products would be updated.`;
+        
+        const action = async () => {
+          addLog('Proceeding with inventory updates despite failsafe...', 'warning');
+          await performInventoryUpdates(updates, statusUpdates, token);
+        };
+        
+        if (triggerFailsafe(msg, action)) {
+          lastRun.inventory = {
+            at: new Date().toISOString(),
+            updated: 0,
+            statusChanged: 0,
+            errors: 0,
+            inSync,
+            notFound,
+            failsafeTriggered: true,
+            wouldUpdate: updates.length,
+            notFoundSample: notFoundItems.slice(0, 100)
+          };
+          return;
+        }
       }
       
-      // Process updates in chunks
+      await performInventoryUpdates(updates, statusUpdates, token);
+    }
+    
+    async function performInventoryUpdates(updates, statusUpdates, token) {
       const chunks = [];
       for (let i = 0; i < updates.length; i += 50) {
         chunks.push(updates.slice(i, i + 50));
@@ -652,34 +766,32 @@ async function updateInventoryJob(token) {
           await new Promise(r => setTimeout(r, 200));
         }
       }
-    }
-    
-    // Apply status updates (activate products with stock)
-    if (statusUpdates.length > 0) {
-      addLog(`Updating status for ${statusUpdates.length} products...`, 'info');
       
-      for (const update of statusUpdates) {
-        if (shouldAbort(token)) break;
+      if (statusUpdates.length > 0) {
+        addLog(`Updating status for ${statusUpdates.length} products...`, 'info');
         
-        try {
-          await shopifyClient.put(`/products/${update.id}.json`, {
-            product: {
-              id: update.id,
-              status: update.newStatus
-            }
-          });
-          addLog(`Updated status for "${update.title}" from ${update.oldStatus} to ${update.newStatus}`, 'success');
-          statusChanged++;
-        } catch (e) {
-          errors++;
-          addLog(`Error updating status for "${update.title}": ${e.message}`, 'error', e);
+        for (const update of statusUpdates) {
+          if (shouldAbort(token)) break;
+          
+          try {
+            await shopifyClient.put(`/products/${update.id}.json`, {
+              product: {
+                id: update.id,
+                status: update.newStatus
+              }
+            });
+            addLog(`Updated status for "${update.title}" from ${update.oldStatus} to ${update.newStatus}`, 'success');
+            statusChanged++;
+          } catch (e) {
+            errors++;
+            addLog(`Error updating status for "${update.title}": ${e.message}`, 'error', e);
+          }
+          
+          await new Promise(r => setTimeout(r, 500));
         }
-        
-        await new Promise(r => setTimeout(r, 500)); // Rate limit
       }
     }
     
-    // Final summary
     addLog(`Inventory update complete: Updated: ${updated}, Status Changed: ${statusChanged}, Errors: ${errors}, In Sync: ${inSync}, Not Found: ${notFound}`, 'success');
     
   } catch (e) {
@@ -694,13 +806,12 @@ async function updateInventoryJob(token) {
     errors,
     inSync,
     notFound,
-    notFoundSample: notFoundItems.slice(0, 100) // Store sample for reference
+    notFoundSample: notFoundItems.slice(0, 100)
   };
   
   stats.inventoryUpdates += updated;
 }
 
-// Add the createNewProductsJob
 async function createNewProductsJob(token) {
   addLog('Starting new product creation (SKU-based check)...', 'info');
   let created = 0, errors = 0, skipped = 0;
@@ -713,30 +824,61 @@ async function createNewProductsJob(token) {
     
     if (shouldAbort(token)) return;
     
-    // Process Apify products with price calculation
     const apifyProcessed = processApifyProducts(apifyData, { processPrice: true });
     
-    // Create SKU map for fast lookups - include all products
     const skuMap = new Map();
     for (const product of shopifyData) {
       const sku = product.variants?.[0]?.sku;
       if (sku) skuMap.set(sku.toLowerCase(), product);
     }
     
-    // Find products to create (not in Shopify yet)
     const toCreate = apifyProcessed.filter(p => !matchShopifyProductBySku(p, skuMap).product);
     
     addLog(`Found ${toCreate.length} new products to create.`, 'info');
     
     if (toCreate.length > 0) {
-      // Failsafe check - don't create too many products at once
-      const maxToCreate = Math.min(toCreate.length, FAILSAFE_LIMITS.MAX_NEW_PRODUCTS_AT_ONCE, MAX_CREATE_PER_RUN);
+      let maxToCreate = Math.min(toCreate.length, MAX_CREATE_PER_RUN);
+      
+      if (toCreate.length > FAILSAFE_LIMITS.MAX_NEW_PRODUCTS_AT_ONCE && !failsafeOverride) {
+        const msg = `Would create ${toCreate.length} new products, exceeding failsafe limit of ${FAILSAFE_LIMITS.MAX_NEW_PRODUCTS_AT_ONCE}.`;
+        
+        const action = async () => {
+          addLog('Proceeding with product creation despite failsafe...', 'warning');
+          maxToCreate = Math.min(toCreate.length, MAX_CREATE_PER_RUN);
+          await performProductCreation(toCreate, maxToCreate, token);
+        };
+        
+        if (triggerFailsafe(msg, action)) {
+          lastRun.products = {
+            at: new Date().toISOString(),
+            created: 0,
+            errors: 0,
+            skipped: toCreate.length,
+            failsafeTriggered: true,
+            wouldCreate: toCreate.length,
+            createdItems: []
+          };
+          return;
+        }
+      }
       
       if (toCreate.length > maxToCreate) {
         addLog(`Limiting creation to ${maxToCreate} products out of ${toCreate.length} found.`, 'warning');
       }
       
-      // Create products one by one
+      await performProductCreation(toCreate, maxToCreate, token);
+    } else {
+      addLog('No new products to create.', 'success');
+      lastRun.products = {
+        at: new Date().toISOString(),
+        created: 0,
+        errors: 0,
+        skipped: 0,
+        createdItems: []
+      };
+    }
+    
+    async function performProductCreation(toCreate, maxToCreate, token) {
       const createdItems = [];
       
       for (let i = 0; i < maxToCreate; i++) {
@@ -745,15 +887,14 @@ async function createNewProductsJob(token) {
         const apifyProd = toCreate[i];
         
         try {
-          // Prepare product data
           const newProduct = {
             product: {
               title: apifyProd.title,
               body_html: apifyProd.body_html || '',
               vendor: 'Imported',
               product_type: '',
-              tags: SUPPLIER_TAG, // Use the correct supplier tag
-              status: apifyProd.inventory > 0 ? 'active' : 'draft', // Set status based on inventory
+              tags: SUPPLIER_TAG,
+              status: apifyProd.inventory > 0 ? 'active' : 'draft',
               variants: [{
                 price: apifyProd.price,
                 sku: apifyProd.sku,
@@ -763,12 +904,10 @@ async function createNewProductsJob(token) {
             }
           };
           
-          // Create product
           const { data } = await shopifyClient.post('/products.json', newProduct);
           const newProductId = data.product.id;
           const inventoryItemId = data.product.variants[0].inventory_item_id;
           
-          // Set inventory
           await shopifyClient.post('/inventory_levels/set.json', {
             inventory_item_id: inventoryItemId,
             location_id: config.shopify.locationId,
@@ -789,7 +928,7 @@ async function createNewProductsJob(token) {
           addLog(`Error creating product "${apifyProd.title}": ${e.message}`, 'error', e);
         }
         
-        await new Promise(r => setTimeout(r, 1000)); // Longer delay for product creation
+        await new Promise(r => setTimeout(r, 1000));
       }
       
       lastRun.products = {
@@ -798,16 +937,6 @@ async function createNewProductsJob(token) {
         errors,
         skipped: toCreate.length - created,
         createdItems
-      };
-      
-    } else {
-      addLog('No new products to create.', 'success');
-      lastRun.products = {
-        at: new Date().toISOString(),
-        created: 0,
-        errors: 0,
-        skipped: 0,
-        createdItems: []
       };
     }
     
@@ -827,7 +956,6 @@ async function createNewProductsJob(token) {
   stats.newProducts += created;
 }
 
-// Add the handleDiscontinuedProductsJob
 async function handleDiscontinuedProductsJob(token) {
   addLog('Starting discontinued check (SKU-only)...', 'info');
   let discontinued = 0, errors = 0, skipped = 0;
@@ -840,39 +968,64 @@ async function handleDiscontinuedProductsJob(token) {
     
     if (shouldAbort(token)) return;
     
-    // Get all SKUs from Apify (currently available products)
     const apifySkus = new Set(
       processApifyProducts(apifyData, { processPrice: false })
         .map(p => p.sku.toLowerCase())
     );
     
-    // Find products in Shopify that may be discontinued (not in Apify anymore)
-    const potentialDiscontinued = shopifyData.filter(p => {
-      const sku = p.variants?.[0]?.sku?.toLowerCase();
-      // Only consider products with the supplier tag and that have a SKU
-      return sku && 
-             p.tags && 
-             p.tags.includes(SUPPLIER_TAG) && 
-             !apifySkus.has(sku) &&
-             p.status === 'active'; // Only consider active products
+    const supplierProducts = shopifyData.filter(p => {
+      return p.tags && p.tags.includes(SUPPLIER_TAG);
     });
     
-    addLog(`Found ${potentialDiscontinued.length} potential discontinued products.`, 'info');
+    const potentialDiscontinued = supplierProducts.filter(p => {
+      const sku = p.variants?.[0]?.sku?.toLowerCase();
+      return sku && 
+             !apifySkus.has(sku) &&
+             p.status === 'active';
+    });
+    
+    addLog(`Found ${potentialDiscontinued.length} potential discontinued products out of ${supplierProducts.length} supplier products.`, 'info');
     
     if (potentialDiscontinued.length > 0) {
-      // Failsafe check - don't discontinue too many products at once
-      const discontinuePercentage = (potentialDiscontinued.length / shopifyData.filter(p => p.tags && p.tags.includes(SUPPLIER_TAG)).length) * 100;
+      const discontinuePercentage = (potentialDiscontinued.length / supplierProducts.length) * 100;
       
-      if (discontinuePercentage > FAILSAFE_LIMITS.MAX_DISCONTINUE_PERCENTAGE) {
-        const msg = `Discontinue percentage (${discontinuePercentage.toFixed(1)}%) exceeds failsafe limit (${FAILSAFE_LIMITS.MAX_DISCONTINUE_PERCENTAGE}%)`;
-        addLog(msg, 'error');
-        throw new Error(msg);
+      if (discontinuePercentage > FAILSAFE_LIMITS.MAX_DISCONTINUE_PERCENTAGE && !failsafeOverride) {
+        const msg = `Discontinue percentage (${discontinuePercentage.toFixed(1)}%) exceeds failsafe limit (${FAILSAFE_LIMITS.MAX_DISCONTINUE_PERCENTAGE}%). Would discontinue ${potentialDiscontinued.length} out of ${supplierProducts.length} products.`;
+        
+        const action = async () => {
+          addLog('Proceeding with discontinuing products despite failsafe...', 'warning');
+          await performDiscontinue(potentialDiscontinued, token);
+        };
+        
+        if (triggerFailsafe(msg, action)) {
+          lastRun.discontinued = {
+            at: new Date().toISOString(),
+            discontinued: 0,
+            errors: 0,
+            skipped: potentialDiscontinued.length,
+            failsafeTriggered: true,
+            wouldDiscontinue: potentialDiscontinued.length,
+            discontinuedItems: []
+          };
+          return;
+        }
       }
       
-      // Track products that have been discontinued
+      await performDiscontinue(potentialDiscontinued, token);
+    } else {
+      addLog('No products to discontinue.', 'success');
+      lastRun.discontinued = {
+        at: new Date().toISOString(),
+        discontinued: 0,
+        errors: 0,
+        skipped: 0,
+        discontinuedItems: []
+      };
+    }
+    
+    async function performDiscontinue(potentialDiscontinued, token) {
       const discontinuedItems = [];
       
-      // Process discontinued products in chunks
       const chunks = [];
       for (let i = 0; i < potentialDiscontinued.length; i += 50) {
         chunks.push(potentialDiscontinued.slice(i, i + 50));
@@ -883,7 +1036,6 @@ async function handleDiscontinuedProductsJob(token) {
         
         for (const product of chunk) {
           try {
-            // Set inventory to 0
             const inventoryItemId = product.variants[0].inventory_item_id;
             
             await shopifyClient.post('/inventory_levels/set.json', {
@@ -892,7 +1044,6 @@ async function handleDiscontinuedProductsJob(token) {
               available: 0
             });
             
-            // Update product to draft status
             await shopifyClient.put(`/products/${product.id}.json`, {
               product: {
                 id: product.id,
@@ -925,16 +1076,6 @@ async function handleDiscontinuedProductsJob(token) {
         skipped: potentialDiscontinued.length - discontinued,
         discontinuedItems
       };
-      
-    } else {
-      addLog('No products to discontinue.', 'success');
-      lastRun.discontinued = {
-        at: new Date().toISOString(),
-        discontinued: 0,
-        errors: 0,
-        skipped: 0,
-        discontinuedItems: []
-      };
     }
     
   } catch (e) {
@@ -953,7 +1094,6 @@ async function handleDiscontinuedProductsJob(token) {
   stats.discontinued += discontinued;
 }
 
-// Error reporting function
 async function generateAndSendErrorReport() {
   try {
     if (errorSummary.size === 0) {
@@ -1192,7 +1332,6 @@ app.get('/', (req, res) => {
           box-shadow: 0 3px 10px rgba(0,0,0,0.05);
         }
         
-        /* Animated background for status */
         .bg-running {
           background: linear-gradient(-45deg, #06d6a0, #1b9aaa, #4cc9f0, #3a86ff);
           background-size: 400% 400%;
@@ -1215,6 +1354,12 @@ app.get('/', (req, res) => {
           0% { background-position: 0% 50%; }
           50% { background-position: 100% 50%; }
           100% { background-position: 0% 50%; }
+        }
+        
+        .failsafe-actions {
+          margin-top: 1rem;
+          padding-top: 1rem;
+          border-top: 1px solid rgba(0,0,0,0.1);
         }
       </style>
     </head>
@@ -1276,7 +1421,7 @@ app.get('/', (req, res) => {
                   
                   ${failsafeTriggered ? 
                     `<button class="btn btn-danger" onclick="fetch('/api/failsafe/clear', {method: 'POST'}).then(() => location.reload())">
-                      <i class="fas fa-exclamation-triangle"></i> Clear Failsafe
+                      <i class="fas fa-times-circle"></i> Clear Failsafe
                     </button>` : 
                     ``
                   }
@@ -1286,6 +1431,19 @@ app.get('/', (req, res) => {
                   `<div class="alert alert-danger mt-3">
                     <i class="fas fa-exclamation-circle me-2"></i>
                     <strong>Failsafe triggered:</strong> ${failsafeReason}
+                    
+                    ${pendingFailsafeAction ? 
+                      `<div class="failsafe-actions">
+                        <p class="mb-2"><strong>Action Required:</strong> Do you want to proceed anyway?</p>
+                        <button class="btn btn-danger" onclick="proceedWithFailsafe()">
+                          <i class="fas fa-exclamation-triangle"></i> Proceed Anyway
+                        </button>
+                        <button class="btn btn-secondary" onclick="abortFailsafe()">
+                          <i class="fas fa-ban"></i> Abort Operation
+                        </button>
+                      </div>` : 
+                      ``
+                    }
                   </div>` : 
                   ``
                 }
@@ -1359,6 +1517,40 @@ app.get('/', (req, res) => {
             });
         }
         
+        function proceedWithFailsafe() {
+          if (confirm('Are you sure you want to proceed despite the failsafe warning? This may affect many products.')) {
+            fetch('/api/failsafe/proceed', { method: 'POST' })
+              .then(response => response.json())
+              .then(data => {
+                if (data.s === 1) {
+                  alert('Proceeding with operation...');
+                  setTimeout(() => location.reload(), 1000);
+                } else {
+                  alert('Failed to proceed: ' + (data.msg || 'Unknown error'));
+                }
+              })
+              .catch(error => {
+                alert('Error: ' + error);
+              });
+          }
+        }
+        
+        function abortFailsafe() {
+          fetch('/api/failsafe/abort', { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+              if (data.s === 1) {
+                alert('Operation aborted.');
+                setTimeout(() => location.reload(), 1000);
+              } else {
+                alert('Failed to abort: ' + (data.msg || 'Unknown error'));
+              }
+            })
+            .catch(error => {
+              alert('Error: ' + error);
+            });
+        }
+        
         // Auto-refresh page every 30 seconds
         setTimeout(() => location.reload(), 30000);
       </script>
@@ -1367,7 +1559,17 @@ app.get('/', (req, res) => {
   `);
 });
 
-app.get('/api/status', (req, res) => res.json({ stats, lastRun, logs, systemPaused, failsafeTriggered, failsafeReason, errorSummary: Array.from(errorSummary.entries()).map(([msg, count]) => ({msg, count})) }));
+app.get('/api/status', (req, res) => res.json({ 
+  stats, 
+  lastRun, 
+  logs, 
+  systemPaused, 
+  failsafeTriggered, 
+  failsafeReason, 
+  failsafeOverride,
+  pendingFailsafeAction: !!pendingFailsafeAction,
+  errorSummary: Array.from(errorSummary.entries()).map(([msg, count]) => ({msg, count})) 
+}));
 
 app.post('/api/pause', (req, res) => {
   const { paused } = req.body;
@@ -1377,7 +1579,6 @@ app.post('/api/pause', (req, res) => {
   addLog(`System ${systemPaused ? 'paused' : 'resumed'} by user`, 'warning');
   
   if (!systemPaused) {
-    // Increment abort version to prevent old jobs from continuing
     abortVersion++;
   }
   
@@ -1391,23 +1592,28 @@ app.post('/api/failsafe/clear', (req, res) => {
   failsafeTriggered = false;
   failsafeReason = '';
   pendingFailsafeAction = null;
-  abortVersion++; // Increment to allow new jobs to start
+  failsafeOverride = false;
+  abortVersion++;
   
   return res.json({ s: 1 });
 });
 
-app.post('/api/failsafe/confirm', (req, res) => {
+app.post('/api/failsafe/proceed', (req, res) => {
   if (!failsafeTriggered || !pendingFailsafeAction) {
     return res.status(400).json({ s: 0, msg: 'No pending failsafe action' });
   }
   
+  addLog('User chose to proceed despite failsafe warning', 'warning');
+  
+  // Set override flag and execute the pending action
+  failsafeOverride = true;
   const action = pendingFailsafeAction;
   pendingFailsafeAction = null;
   
-  addLog('Failsafe action confirmed by user', 'warning');
-  
-  // Execute the pending action
-  action();
+  // Execute the action
+  setImmediate(() => {
+    action();
+  });
   
   return res.json({ s: 1 });
 });
@@ -1421,6 +1627,7 @@ app.post('/api/failsafe/abort', (req, res) => {
   failsafeTriggered = false;
   failsafeReason = '';
   pendingFailsafeAction = null;
+  failsafeOverride = false;
   
   return res.json({ s: 1 });
 });
