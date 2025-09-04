@@ -40,19 +40,19 @@ async function notifyTelegram(text) { if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_
 function startBackgroundJob(key, name, fn) { if (jobLocks[key]) { addLog(`${name} already running; ignoring duplicate start`, 'warning'); return false; } if (failsafeTriggered) { addLog(`System in failsafe mode. Cannot start job: ${name}`, 'warning'); return false; } jobLocks[key] = true; const token = getJobToken(); addLog(`Started background job: ${name}`, 'info'); setImmediate(async () => { try { await fn(token); } catch (e) { addLog(`Unhandled error in ${name}: ${e.message}\n${e.stack}`, 'error', e); } finally { jobLocks[key] = false; addLog(`${name} job finished`, 'info'); } }); return true; }
 function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); const words2 = new Set(str2.split(' ')); const intersection = new Set([...words1].filter(x => words2.has(x))); return (intersection.size / Math.max(words1.size, words2.size)) * 100; }
 
-// NEW: Helper for robust Shopify API calls with rate-limit handling
+// ENHANCED Helper for robust Shopify API calls with more patient rate-limit handling
 async function shopifyRequestWithRetry(requestFn, ...args) {
-    const maxRetries = 5;
+    const maxRetries = 7; // Increased max retries
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
             return await requestFn(...args);
         } catch (error) {
             if (error.response && error.response.status === 429) {
-                const retryAfter = error.response.headers['retry-after'] ? parseFloat(error.response.headers['retry-after']) * 1000 : (2 ** attempt) * 1000 + Math.random() * 1000;
+                // Use Shopify's suggested wait time if available, otherwise use exponential backoff with a longer base
+                const retryAfter = error.response.headers['retry-after'] ? parseFloat(error.response.headers['retry-after']) * 1000 : (2 ** attempt) * 2000 + Math.random() * 1000;
                 addLog(`Shopify rate limit hit. Retrying in ${Math.round(retryAfter / 1000)}s... (Attempt ${attempt + 1}/${maxRetries})`, 'warning');
                 await new Promise(res => setTimeout(res, retryAfter));
             } else {
-                // Not a rate-limit error, so re-throw it
                 throw error;
             }
         }
@@ -137,7 +137,7 @@ async function updateInventoryJob(token, { overrideFailsafe = false } = {}) {
             failsafeTriggered = true;
             failsafeReason = e.message;
             pendingFailsafeAction = () => startBackgroundJob('inventory', 'Inventory Sync (OVERRIDE)', t => updateInventoryJob(t, { overrideFailsafe: true }));
-            const msg = `<b>FAILSAFE TRIGGERED</b>\n${e.message}\nThe system is paused. Please review the logs and choose to proceed or abort in the dashboard.`;
+            const msg = `<b>APIFY SYNC: FAILSAFE TRIGGERED</b>\n${e.message}\nThe system is paused. Please review the logs and choose to proceed or abort in the dashboard.`;
             addLog(e.message, 'error');
             await notifyTelegram(msg);
             return;
@@ -169,16 +169,37 @@ async function createNewProductsJob(token, { overrideFailsafe = false } = {}) {
         if (toCreate.length > 0) {
             const maxToCreate = Math.min(toCreate.length, MAX_CREATE_PER_RUN);
             if (toCreate.length > maxToCreate) addLog(`Limiting creation to ${maxToCreate} products per run.`, 'warning');
-            for (let i = 0; i < maxToCreate; i++) { if (shouldAbort(token)) break; const apifyProd = toCreate[i]; try { const newProduct = { product: { title: apifyProd.title, body_html: apifyProd.body_html || '', vendor: 'Imported', tags: SUPPLIER_TAG, status: apifyProd.inventory > 0 ? 'active' : 'draft', variants: [{ price: apifyProd.price, sku: apifyProd.sku, inventory_management: 'shopify' }], images: apifyProd.images } }; const { data } = await shopifyRequestWithRetry(shopifyClient.post, '/products.json', newProduct); const inventoryItemId = data.product.variants[0].inventory_item_id; await shopifyRequestWithRetry(shopifyClient.post, '/inventory_levels/set.json', { inventory_item_id: inventoryItemId, location_id: config.shopify.locationId, available: apifyProd.inventory }); created++; createdItems.push({ id: data.product.id, title: apifyProd.title, sku: apifyProd.sku }); addLog(`Created product: "${apifyProd.title}" (SKU: ${apifyProd.sku}, Status: ${newProduct.product.status})`, 'success'); } catch (e) { errors++; addLog(`Error creating product "${apifyProd.title}": ${e.message}`, 'error', e); } }
+            for (let i = 0; i < maxToCreate; i++) {
+                if (shouldAbort(token)) break;
+                const apifyProd = toCreate[i];
+                try {
+                    const newProduct = { product: { title: apifyProd.title, body_html: apifyProd.body_html || '', vendor: 'Imported', tags: SUPPLIER_TAG, status: apifyProd.inventory > 0 ? 'active' : 'draft', variants: [{ price: apifyProd.price, sku: apifyProd.sku, inventory_management: 'shopify' }], images: apifyProd.images } };
+                    const { data } = await shopifyRequestWithRetry(shopifyClient.post, '/products.json', newProduct);
+                    const inventoryItemId = data.product.variants[0].inventory_item_id;
+                    if (inventoryItemId) {
+                       await shopifyRequestWithRetry(shopifyClient.post, '/inventory_levels/set.json', { inventory_item_id: inventoryItemId, location_id: config.shopify.locationId, available: apifyProd.inventory });
+                    }
+                    created++;
+                    createdItems.push({ id: data.product.id, title: apifyProd.title, sku: apifyProd.sku });
+                    addLog(`Created product: "${apifyProd.title}" (SKU: ${apifyProd.sku}, Status: ${newProduct.product.status})`, 'success');
+                } catch (e) {
+                    errors++;
+                    addLog(`Error creating product "${apifyProd.title}": ${e.message}`, 'error', e);
+                }
+                // PROACTIVE DELAY to prevent hitting rate limits
+                await new Promise(r => setTimeout(r, 2000));
+            }
             skipped = toCreate.length - created;
-        } else { addLog('No new products to create.', 'success'); }
+        } else {
+            addLog('No new products to create.', 'success');
+        }
         stats.newProducts += created;
     } catch (e) {
         if (e.message.includes('exceeds the failsafe limit')) {
             failsafeTriggered = true;
             failsafeReason = e.message;
             pendingFailsafeAction = () => startBackgroundJob('products', 'New Product Sync (OVERRIDE)', t => createNewProductsJob(t, { overrideFailsafe: true }));
-            const msg = `<b>FAILSAFE TRIGGERED</b>\n${e.message}\nThe system is paused. Please review the logs and choose to proceed or abort in the dashboard.`;
+            const msg = `<b>APIFY SYNC: FAILSAFE TRIGGERED</b>\n${e.message}\nThe system is paused. Please review the logs and choose to proceed or abort in the dashboard.`;
             addLog(e.message, 'error');
             await notifyTelegram(msg);
             return;
@@ -217,7 +238,7 @@ async function handleDiscontinuedProductsJob(token, { overrideFailsafe = false }
             failsafeTriggered = true;
             failsafeReason = e.message;
             pendingFailsafeAction = () => startBackgroundJob('discontinued', 'Discontinued Check (OVERRIDE)', t => handleDiscontinuedProductsJob(t, { overrideFailsafe: true }));
-            const msg = `<b>FAILSAFE TRIGGERED</b>\n${e.message}\nThe system is paused. Please review the logs and choose to proceed or abort in the dashboard.`;
+            const msg = `<b>APIFY SYNC: FAILSAFE TRIGGERED</b>\n${e.message}\nThe system is paused. Please review the logs and choose to proceed or abort in the dashboard.`;
             addLog(e.message, 'error');
             await notifyTelegram(msg);
             return;
@@ -246,7 +267,7 @@ async function cleanseUnmatchedProductsJob(token, { overrideFailsafe = false } =
             failsafeTriggered = true;
             failsafeReason = e.message;
             pendingFailsafeAction = () => startBackgroundJob('cleanse-unmatched', 'Cleanse Unmatched (OVERRIDE)', t => cleanseUnmatchedProductsJob(t, { overrideFailsafe: true }));
-            const msg = `<b>FAILSAFE TRIGGERED</b>\n${e.message}\nThe system is paused. Please review the logs and choose to proceed or abort in the dashboard.`;
+            const msg = `<b>APIFY SYNC: FAILSAFE TRIGGERED</b>\n${e.message}\nThe system is paused. Please review the logs and choose to proceed or abort in the dashboard.`;
             addLog(e.message, 'error');
             await notifyTelegram(msg);
             return;
