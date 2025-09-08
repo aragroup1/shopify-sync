@@ -40,7 +40,7 @@ async function notifyTelegram(text) { if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_
 function startBackgroundJob(key, name, fn) { if (jobLocks[key]) { addLog(`${name} already running; ignoring duplicate start`, 'warning'); return false; } if (failsafeTriggered) { addLog(`System in failsafe mode. Cannot start job: ${name}`, 'warning'); return false; } jobLocks[key] = true; const token = getJobToken(); addLog(`Started background job: ${name}`, 'info'); setImmediate(async () => { try { await fn(token); } catch (e) { addLog(`Unhandled error in ${name}: ${e.message}\n${e.stack}`, 'error', e); } finally { jobLocks[key] = false; addLog(`${name} job finished`, 'info'); } }); return true; }
 function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); const words2 = new Set(str2.split(' ')); const intersection = new Set([...words1].filter(x => words2.has(x))); return (intersection.size / Math.max(words1.size, words2.size)) * 100; }
 
-// [+] ENHANCED HELPER FUNCTION: Cleans product titles for display
+// [+] NEW HELPER FUNCTION: Cleans product titles for display
 function cleanProductTitle(title) {
   if (!title) return '';
   
@@ -147,5 +147,4 @@ async function deduplicateProductsJob(token) {
                     addLog(` ✓ Deleted product ID ${id}`, 'success');
                 } catch (e) {
                     errors++;
-                    addLog(` ✗ Error deleting product ID ${id}: ${e.message}`, 'error', e);
-                }
+                    addLog(` ✗ Error deleting product ID ${id}: ${e.message}`, 
