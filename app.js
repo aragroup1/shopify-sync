@@ -38,42 +38,14 @@ async function notifyTelegram(text) { if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_
 function startBackgroundJob(key, name, fn) { if (jobLocks[key]) { addLog(`${name} already running; ignoring duplicate start`, 'warning'); return false; } if (failsafeTriggered) { addLog(`System in failsafe mode. Cannot start job: ${name}`, 'warning'); return false; } jobLocks[key] = true; const token = getJobToken(); addLog(`Started background job: ${name}`, 'info'); setImmediate(async () => { try { await fn(token); } catch (e) { addLog(`Unhandled error in ${name}: ${e.message}\n${e.stack}`, 'error', e); } finally { jobLocks[key] = false; addLog(`${name} job finished`, 'info'); } }); return true; }
 function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); const words2 = new Set(str2.split(' ')); const intersection = new Set([...words1].filter(x => words2.has(x))); return (intersection.size / Math.max(words1.size, words2.size)) * 100; }
 
-// FIXED CLEAN TITLE FUNCTION - Using multiple approaches to ensure it works
+// [+] FINALLY CORRECTED & ROBUST HELPER FUNCTION: Cleans product titles for display
 function cleanProductTitle(title) {
   if (!title) return '';
-  
-  let cleaned = title;
-  
-  // Step 1: Remove parentheses and their contents - using multiple methods to ensure it works
-  // Method 1: Remove common shipping rate patterns explicitly
-  cleaned = cleaned.replace(/\s*KATEX_INLINE_OPENLarge Letter RateKATEX_INLINE_CLOSE/gi, '');
-  cleaned = cleaned.replace(/\s*KATEX_INLINE_OPENParcel RateKATEX_INLINE_CLOSE/gi, '');
-  cleaned = cleaned.replace(/\s*KATEX_INLINE_OPENBig Parcel RateKATEX_INLINE_CLOSE/gi, '');
-  cleaned = cleaned.replace(/\s*KATEX_INLINE_OPENSmall Parcel RateKATEX_INLINE_CLOSE/gi, '');
-  
-  // Method 2: Remove any remaining parentheses with content
-  cleaned = cleaned.replace(/\s*KATEX_INLINE_OPEN[^)]+KATEX_INLINE_CLOSE/g, '');
-  cleaned = cleaned.replace(/\s*```math
-[^```]+```/g, ''); // Also remove square brackets content
-  
-  // Step 2: Remove SKU patterns
-  // Remove patterns like SK28659, ST80056, DE-8335C, R38864
-  cleaned = cleaned.replace(/\b[A-Z]{1,3}[-]?\d{4,}[A-Z]?\b/gi, ' ');
-  
-  // Step 3: Remove standalone 4+ digit numbers like 1433, 0075
-  cleaned = cleaned.replace(/\b\d{4,}\b/g, ' ');
-  
-  // Step 4: Clean up any multiple spaces and trim
-  cleaned = cleaned.replace(/\s+/g, ' ').trim();
-  
-  // Debug logging to verify what's happening
-  if (title !== cleaned) {
-    console.log(`TITLE CLEANING DEBUG:`);
-    console.log(`  Original: "${title}"`);
-    console.log(`  Cleaned:  "${cleaned}"`);
-  }
-  
-  return cleaned;
+  return title
+    .replace(/\s*KATEX_INLINE_OPEN[^)]*KATEX_INLINE_CLOSE\s*/g, ' ')      // THIS IS THE FIX: Properly removes text in parentheses
+    .replace(/\b[A-Z]{0,2}-?\d{4,}[A-Z]?\b/gi, '') // Removes codes like R38864, 1433, SK28659, or DE-8335C
+    .replace(/\s+/g, ' ')               // Cleans up double spaces
+    .trim();                            // Trims leading/trailing whitespace
 }
 
 // ENHANCED Helper for robust Shopify API calls with more patient rate-limit handling
@@ -99,20 +71,8 @@ async function shopifyRequestWithRetry(requestFn, ...args) {
 async function getApifyProducts() { let allItems = []; let offset = 0; addLog('Starting Apify product fetch...', 'info'); try { while (true) { const { data } = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=1000&offset=${offset}`); if (!data || data.length === 0) break; allItems.push(...data); if (data.length < 1000) break; offset += 1000; } } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info'); return allItems; }
 async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) { let allProducts = []; addLog(`Starting Shopify fetch...`, 'info'); try { let url = `/products.json?limit=250&fields=${fields}`; while (url) { const response = await shopifyRequestWithRetry(shopifyClient.get, url); allProducts.push(...response.data.products); const linkHeader = response.headers.link; url = null; if (linkHeader) { const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"')); if (nextLink) { const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/); if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`; } } await new Promise(r => setTimeout(r, 500)); } const activeCount = allProducts.filter(p => p.status === 'active').length; const draftCount = allProducts.filter(p => p.status === 'draft').length; const archivedCount = allProducts.filter(p => p.status === 'archived').length; addLog(`Shopify fetch complete: ${allProducts.length} total products (${activeCount} active, ${draftCount} draft, ${archivedCount} archived).`, 'info'); } catch (error) { addLog(`Shopify fetch error: ${error.message}`, 'error', error); throw error; } return allProducts; }
 async function getShopifyInventoryLevels(inventoryItemIds) { const inventoryMap = new Map(); if (!inventoryItemIds.length) return inventoryMap; try { for (let i = 0; i < inventoryItemIds.length; i += 50) { const chunk = inventoryItemIds.slice(i, i + 50); const { data } = await shopifyRequestWithRetry(shopifyClient.get, `/inventory_levels.json?inventory_item_ids=${chunk.join(',')}&location_ids=${config.shopify.locationId}`); for (const level of data.inventory_levels) { inventoryMap.set(level.inventory_item_id, level.available || 0); } await new Promise(r => setTimeout(r, 500)); } } catch (e) { addLog(`Error fetching inventory levels: ${e.message}`, 'error', e); } return inventoryMap; }
-
-// Updated normalizeForMatching to also handle parentheses properly
-function normalizeForMatching(text = '') { 
-  return String(text).toLowerCase()
-    .replace(/KATEX_INLINE_OPEN[^)]*KATEX_INLINE_CLOSE/g, ' ')  // Remove parentheses content
-    .replace(/```math
-[^```]*```/g, ' ')  // Remove square brackets content
-    .replace(/\b\d{4,}\b/g, ' ')  // Remove SKU numbers
-    .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim(); 
-}
-
+// [+] CORRECTED: This function also had the bug. Now fixed.
+function normalizeForMatching(text = '') { return String(text).toLowerCase().replace(/\s*KATEX_INLINE_OPEN[^)]*KATEX_INLINE_CLOSE\s*/g, ' ').replace(/```math.*?```/gs, ' ').replace(/-parcel-large-letter-rate$/i, '').replace(/-p\d+$/i, '').replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }
 function calculateRetailPrice(supplierCostString) { const cost = parseFloat(supplierCostString); if (isNaN(cost) || cost < 0) return '0.00'; let finalPrice; if (cost <= 1) finalPrice = cost + 5.5; else if (cost <= 2) finalPrice = cost + 5.95; else if (cost <= 3) finalPrice = cost + 6.99; else if (cost <= 5) finalPrice = cost * 3.2; else if (cost <= 7) finalPrice = cost * 2.5; else if (cost <= 9) finalPrice = cost * 2.2; else if (cost <= 12) finalPrice = cost * 2; else if (cost <= 20) finalPrice = cost * 1.9; else finalPrice = cost * 1.8; return finalPrice.toFixed(2); }
 
 function processApifyProducts(apifyData, { processPrice = true } = {}) {
@@ -137,9 +97,7 @@ function processApifyProducts(apifyData, { processPrice = true } = {}) {
                 .filter(media => media.type === 'Image' && media.url)
                 .map(media => ({ src: media.url }));
         }
-        // Clean the title here for storage
-        const cleanedTitle = cleanProductTitle(item.title);
-        return { handle, title: item.title, cleanedTitle, inventory, sku, price, body_html, images, normalizedTitle: normalizeForMatching(item.title) };
+        return { handle, title: item.title, inventory, sku, price, body_html, images, normalizedTitle: normalizeForMatching(item.title) };
     }).filter(p => p && p.sku);
 }
 
@@ -273,13 +231,7 @@ async function createNewProductsJob(token, { overrideFailsafe = false } = {}) {
                 if (shouldAbort(token)) break;
                 const apifyProd = toCreate[i];
                 
-                // Clean the title to remove parcel rates and SKUs
-                const cleanedTitle = apifyProd.cleanedTitle || cleanProductTitle(apifyProd.title);
-                
-                // Always log title cleaning for debugging
-                addLog(`Cleaning title for product ${i+1}/${maxToCreate}:`, 'info');
-                addLog(`  Original: "${apifyProd.title}"`, 'info');
-                addLog(`  Cleaned:  "${cleanedTitle}"`, 'info');
+                const cleanedTitle = cleanProductTitle(apifyProd.title);
 
                 try {
                     const newProduct = { product: { 
@@ -301,7 +253,7 @@ async function createNewProductsJob(token, { overrideFailsafe = false } = {}) {
                     addLog(`Created product: "${cleanedTitle}" (SKU: ${apifyProd.sku}, Status: ${newProduct.product.status})`, 'success');
                 } catch (e) {
                     errors++;
-                    addLog(`Error creating product "${cleanedTitle}": ${e.message}`, 'error', e);
+                    addLog(`Error creating product "${cleanedTitle}" (Original: "${apifyProd.title}"): ${e.message}`, 'error', e);
                 }
                 await new Promise(r => setTimeout(r, 2000));
             }
