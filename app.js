@@ -53,7 +53,8 @@ function cleanProductTitle(title) {
   
   // Method 2: Remove any remaining parentheses with content
   cleaned = cleaned.replace(/\s*KATEX_INLINE_OPEN[^)]+KATEX_INLINE_CLOSE/g, '');
-  cleaned = cleaned.replace(/\s*```math[^```]+```/g, ''); // Also remove square brackets content
+  cleaned = cleaned.replace(/\s*```math
+[^```]+```/g, ''); // Also remove square brackets content
   
   // Step 2: Remove SKU patterns
   // Remove patterns like SK28659, ST80056, DE-8335C, R38864
@@ -103,7 +104,8 @@ async function getShopifyInventoryLevels(inventoryItemIds) { const inventoryMap 
 function normalizeForMatching(text = '') { 
   return String(text).toLowerCase()
     .replace(/KATEX_INLINE_OPEN[^)]*KATEX_INLINE_CLOSE/g, ' ')  // Remove parentheses content
-    .replace(/```math[^```]*```/g, ' ')  // Remove square brackets content
+    .replace(/```math
+[^```]*```/g, ' ')  // Remove square brackets content
     .replace(/\b\d{4,}\b/g, ' ')  // Remove SKU numbers
     .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
     .replace(/[^a-z0-9]+/g, ' ')
