@@ -53,8 +53,7 @@ function cleanProductTitle(title) {
   
   // Method 2: Remove any remaining parentheses with content
   cleaned = cleaned.replace(/\s*KATEX_INLINE_OPEN[^)]+KATEX_INLINE_CLOSE/g, '');
-  cleaned = cleaned.replace(/\s*```math
-[^```]+```/g, ''); // Also remove square brackets content
+  cleaned = cleaned.replace(/\s*```math[^```]+```/g, ''); // Also remove square brackets content
   
   // Step 2: Remove SKU patterns
   // Remove patterns like SK28659, ST80056, DE-8335C, R38864
