@@ -38,15 +38,23 @@ async function notifyTelegram(text) { if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_
 function startBackgroundJob(key, name, fn) { if (jobLocks[key]) { addLog(`${name} already running; ignoring duplicate start`, 'warning'); return false; } if (failsafeTriggered) { addLog(`System in failsafe mode. Cannot start job: ${name}`, 'warning'); return false; } jobLocks[key] = true; const token = getJobToken(); addLog(`Started background job: ${name}`, 'info'); setImmediate(async () => { try { await fn(token); } catch (e) { addLog(`Unhandled error in ${name}: ${e.message}\n${e.stack}`, 'error', e); } finally { jobLocks[key] = false; addLog(`${name} job finished`, 'info'); } }); return true; }
 function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); const words2 = new Set(str2.split(' ')); const intersection = new Set([...words1].filter(x => words2.has(x))); return (intersection.size / Math.max(words1.size, words2.size)) * 100; }
 
-// FIXED CLEAN TITLE FUNCTION - Removes parcel rates and SKUs
+// FIXED CLEAN TITLE FUNCTION - Using multiple approaches to ensure it works
 function cleanProductTitle(title) {
   if (!title) return '';
   
   let cleaned = title;
   
-  // Step 1: Remove anything in parentheses including the parentheses themselves
-  // This handles (Large Letter Rate), (Parcel Rate), (Big Parcel Rate), etc.
-  cleaned = cleaned.replace(/\s*KATEX_INLINE_OPEN[^)]*KATEX_INLINE_CLOSE\s*/g, ' ');
+  // Step 1: Remove parentheses and their contents - using multiple methods to ensure it works
+  // Method 1: Remove common shipping rate patterns explicitly
+  cleaned = cleaned.replace(/\s*KATEX_INLINE_OPENLarge Letter RateKATEX_INLINE_CLOSE/gi, '');
+  cleaned = cleaned.replace(/\s*KATEX_INLINE_OPENParcel RateKATEX_INLINE_CLOSE/gi, '');
+  cleaned = cleaned.replace(/\s*KATEX_INLINE_OPENBig Parcel RateKATEX_INLINE_CLOSE/gi, '');
+  cleaned = cleaned.replace(/\s*KATEX_INLINE_OPENSmall Parcel RateKATEX_INLINE_CLOSE/gi, '');
+  
+  // Method 2: Remove any remaining parentheses with content
+  cleaned = cleaned.replace(/\s*KATEX_INLINE_OPEN[^)]+KATEX_INLINE_CLOSE/g, '');
+  cleaned = cleaned.replace(/\s*```math
+[^```]+```/g, ''); // Also remove square brackets content
   
   // Step 2: Remove SKU patterns
   // Remove patterns like SK28659, ST80056, DE-8335C, R38864
@@ -91,7 +99,20 @@ async function shopifyRequestWithRetry(requestFn, ...args) {
 async function getApifyProducts() { let allItems = []; let offset = 0; addLog('Starting Apify product fetch...', 'info'); try { while (true) { const { data } = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=1000&offset=${offset}`); if (!data || data.length === 0) break; allItems.push(...data); if (data.length < 1000) break; offset += 1000; } } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info'); return allItems; }
 async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) { let allProducts = []; addLog(`Starting Shopify fetch...`, 'info'); try { let url = `/products.json?limit=250&fields=${fields}`; while (url) { const response = await shopifyRequestWithRetry(shopifyClient.get, url); allProducts.push(...response.data.products); const linkHeader = response.headers.link; url = null; if (linkHeader) { const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"')); if (nextLink) { const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/); if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`; } } await new Promise(r => setTimeout(r, 500)); } const activeCount = allProducts.filter(p => p.status === 'active').length; const draftCount = allProducts.filter(p => p.status === 'draft').length; const archivedCount = allProducts.filter(p => p.status === 'archived').length; addLog(`Shopify fetch complete: ${allProducts.length} total products (${activeCount} active, ${draftCount} draft, ${archivedCount} archived).`, 'info'); } catch (error) { addLog(`Shopify fetch error: ${error.message}`, 'error', error); throw error; } return allProducts; }
 async function getShopifyInventoryLevels(inventoryItemIds) { const inventoryMap = new Map(); if (!inventoryItemIds.length) return inventoryMap; try { for (let i = 0; i < inventoryItemIds.length; i += 50) { const chunk = inventoryItemIds.slice(i, i + 50); const { data } = await shopifyRequestWithRetry(shopifyClient.get, `/inventory_levels.json?inventory_item_ids=${chunk.join(',')}&location_ids=${config.shopify.locationId}`); for (const level of data.inventory_levels) { inventoryMap.set(level.inventory_item_id, level.available || 0); } await new Promise(r => setTimeout(r, 500)); } } catch (e) { addLog(`Error fetching inventory levels: ${e.message}`, 'error', e); } return inventoryMap; }
-function normalizeForMatching(text = '') { return String(text).toLowerCase().replace(/\s*KATEX_INLINE_OPEN[^)]*KATEX_INLINE_CLOSE\s*/g, ' ').replace(/```math.*?```/g, ' ').replace(/```math.*?```/gs, ' ').replace(/-parcel-large-letter-rate$/i, '').replace(/-p\d+$/i, '').replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }
+
+// Updated normalizeForMatching to also handle parentheses properly
+function normalizeForMatching(text = '') { 
+  return String(text).toLowerCase()
+    .replace(/KATEX_INLINE_OPEN[^)]*KATEX_INLINE_CLOSE/g, ' ')  // Remove parentheses content
+    .replace(/```math
+[^```]*```/g, ' ')  // Remove square brackets content
+    .replace(/\b\d{4,}\b/g, ' ')  // Remove SKU numbers
+    .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim(); 
+}
+
 function calculateRetailPrice(supplierCostString) { const cost = parseFloat(supplierCostString); if (isNaN(cost) || cost < 0) return '0.00'; let finalPrice; if (cost <= 1) finalPrice = cost + 5.5; else if (cost <= 2) finalPrice = cost + 5.95; else if (cost <= 3) finalPrice = cost + 6.99; else if (cost <= 5) finalPrice = cost * 3.2; else if (cost <= 7) finalPrice = cost * 2.5; else if (cost <= 9) finalPrice = cost * 2.2; else if (cost <= 12) finalPrice = cost * 2; else if (cost <= 20) finalPrice = cost * 1.9; else finalPrice = cost * 1.8; return finalPrice.toFixed(2); }
 
 function processApifyProducts(apifyData, { processPrice = true } = {}) {
