@@ -151,4 +151,5 @@ async function deduplicateProductsJob(token) {
                     deletedCount++; 
                     addLog(` ✓ Deleted product ID ${id}`, 'success'); 
                 } catch (e) { 
-                    errors
+                    errors++; 
+                    addLog(` ✗
