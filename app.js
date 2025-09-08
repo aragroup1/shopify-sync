@@ -103,8 +103,7 @@ async function getShopifyInventoryLevels(inventoryItemIds) { const inventoryMap 
 function normalizeForMatching(text = '') { 
   return String(text).toLowerCase()
     .replace(/KATEX_INLINE_OPEN[^)]*KATEX_INLINE_CLOSE/g, ' ')  // Remove parentheses content
-    .replace(/```math
-[^```]*```/g, ' ')  // Remove square brackets content
+    .replace(/```math[^```]*```/g, ' ')  // Remove square brackets content
     .replace(/\b\d{4,}\b/g, ' ')  // Remove SKU numbers
     .replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '')
     .replace(/[^a-z0-9]+/g, ' ')
