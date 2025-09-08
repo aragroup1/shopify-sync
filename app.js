@@ -40,12 +40,12 @@ async function notifyTelegram(text) { if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_
 function startBackgroundJob(key, name, fn) { if (jobLocks[key]) { addLog(`${name} already running; ignoring duplicate start`, 'warning'); return false; } if (failsafeTriggered) { addLog(`System in failsafe mode. Cannot start job: ${name}`, 'warning'); return false; } jobLocks[key] = true; const token = getJobToken(); addLog(`Started background job: ${name}`, 'info'); setImmediate(async () => { try { await fn(token); } catch (e) { addLog(`Unhandled error in ${name}: ${e.message}\n${e.stack}`, 'error', e); } finally { jobLocks[key] = false; addLog(`${name} job finished`, 'info'); } }); return true; }
 function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); const words2 = new Set(str2.split(' ')); const intersection = new Set([...words1].filter(x => words2.has(x))); return (intersection.size / Math.max(words1.size, words2.size)) * 100; }
 
-// [+] IMPROVED HELPER FUNCTION: Cleans product titles for display
+// [+] CORRECTED HELPER FUNCTION: Cleans product titles for display
 function cleanProductTitle(title) {
   if (!title) return '';
   return title
-    .replace(/\b[A-Z]?\d{4,}\b/gi, '') // Removes codes like R38864, SK28659, or 1433
-    .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')      // Removes text in brackets like (Large Letter Rate)
+    .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ')      // Removes text in brackets like (Large Letter Rate)
+    .replace(/\b[A-Z]?\d{4,}\b/gi, '') // Removes codes like R38864 or 1433
     .replace(/\s+/g, ' ')               // Cleans up double spaces
     .trim();                            // Trims leading/trailing whitespace
 }
@@ -76,13 +76,10 @@ async function getShopifyInventoryLevels(inventoryItemIds) { const inventoryMap 
 function normalizeForMatching(text = '') { return String(text).toLowerCase().replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ').replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ').replace(/```math.*?```/gs, ' ').replace(/-parcel-large-letter-rate$/i, '').replace(/-p\d+$/i, '').replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }
 function calculateRetailPrice(supplierCostString) { const cost = parseFloat(supplierCostString); if (isNaN(cost) || cost < 0) return '0.00'; let finalPrice; if (cost <= 1) finalPrice = cost + 5.5; else if (cost <= 2) finalPrice = cost + 5.95; else if (cost <= 3) finalPrice = cost + 6.99; else if (cost <= 5) finalPrice = cost * 3.2; else if (cost <= 7) finalPrice = cost * 2.5; else if (cost <= 9) finalPrice = cost * 2.2; else if (cost <= 12) finalPrice = cost * 2; else if (cost <= 20) finalPrice = cost * 1.9; else finalPrice = cost * 1.8; return finalPrice.toFixed(2); }
 
-// [+] CORRECTED: Title is now cleaned here, at the source.
 function processApifyProducts(apifyData, { processPrice = true } = {}) {
     return apifyData.map(item => {
         if (!item || !item.title) return null;
-
-        const cleanedTitle = cleanProductTitle(item.title); // Clean the title immediately
-        const handle = normalizeForMatching(item.handle || cleanedTitle).replace(/ /g, '-');
+        const handle = normalizeForMatching(item.handle || item.title).replace(/ /g, '-');
         let inventory = 20;
         if (item.variants?.[0]?.price?.stockStatus === 'OutOfStock') inventory = 0;
         let sku = item.variants?.[0]?.sku || item.sku || '';
@@ -101,16 +98,7 @@ function processApifyProducts(apifyData, { processPrice = true } = {}) {
                 .filter(media => media.type === 'Image' && media.url)
                 .map(media => ({ src: media.url }));
         }
-        return { 
-            handle, 
-            title: cleanedTitle, // Use the cleaned title from now on
-            inventory, 
-            sku, 
-            price, 
-            body_html, 
-            images, 
-            normalizedTitle: normalizeForMatching(item.title) // Keep original normalization for matching purposes
-        };
+        return { handle, title: item.title, inventory, sku, price, body_html, images, normalizedTitle: normalizeForMatching(item.title) };
     }).filter(p => p && p.sku);
 }
 
@@ -244,10 +232,12 @@ async function createNewProductsJob(token, { overrideFailsafe = false } = {}) {
                 if (shouldAbort(token)) break;
                 const apifyProd = toCreate[i];
                 
-                // [+] CORRECTED: The title is now pre-cleaned by processApifyProducts. No extra cleaning is needed here.
+                // [+] MODIFIED: Use the dedicated function for robust title cleaning
+                const cleanedTitle = cleanProductTitle(apifyProd.title);
+
                 try {
                     const newProduct = { product: { 
-                        title: apifyProd.title, // This is now the clean title
+                        title: cleanedTitle, 
                         body_html: apifyProd.body_html || '', 
                         vendor: 'Imported', 
                         tags: SUPPLIER_TAG, 
@@ -261,11 +251,13 @@ async function createNewProductsJob(token, { overrideFailsafe = false } = {}) {
                        await shopifyRequestWithRetry(shopifyClient.post, '/inventory_levels/set.json', { inventory_item_id: inventoryItemId, location_id: config.shopify.locationId, available: apifyProd.inventory });
                     }
                     created++;
-                    createdItems.push({ id: data.product.id, title: apifyProd.title, sku: apifyProd.sku });
-                    addLog(`Created product: "${apifyProd.title}" (SKU: ${apifyProd.sku}, Status: ${newProduct.product.status})`, 'success');
+                    createdItems.push({ id: data.product.id, title: cleanedTitle, sku: apifyProd.sku });
+                    // [+] MODIFIED: Log now shows the cleaned title to confirm it worked
+                    addLog(`Created product: "${cleanedTitle}" (SKU: ${apifyProd.sku}, Status: ${newProduct.product.status})`, 'success');
                 } catch (e) {
                     errors++;
-                    addLog(`Error creating product "${apifyProd.title}": ${e.message}`, 'error', e);
+                    // [+] MODIFIED: Error log includes original title for easier debugging
+                    addLog(`Error creating product "${cleanedTitle}" (Original: "${apifyProd.title}"): ${e.message}`, 'error', e);
                 }
                 await new Promise(r => setTimeout(r, 2000));
             }
