@@ -40,6 +40,16 @@ async function notifyTelegram(text) { if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_
 function startBackgroundJob(key, name, fn) { if (jobLocks[key]) { addLog(`${name} already running; ignoring duplicate start`, 'warning'); return false; } if (failsafeTriggered) { addLog(`System in failsafe mode. Cannot start job: ${name}`, 'warning'); return false; } jobLocks[key] = true; const token = getJobToken(); addLog(`Started background job: ${name}`, 'info'); setImmediate(async () => { try { await fn(token); } catch (e) { addLog(`Unhandled error in ${name}: ${e.message}\n${e.stack}`, 'error', e); } finally { jobLocks[key] = false; addLog(`${name} job finished`, 'info'); } }); return true; }
 function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); const words2 = new Set(str2.split(' ')); const intersection = new Set([...words1].filter(x => words2.has(x))); return (intersection.size / Math.max(words1.size, words2.size)) * 100; }
 
+// [+] NEW HELPER FUNCTION: Cleans product titles for display
+function cleanProductTitle(title) {
+  if (!title) return '';
+  return title
+    .replace(/\b[A-Z]?\d{4,}\b/gi, '') // Removes codes like R38864 or 1433
+    .replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, '')      // Removes text in brackets like (Large Letter Rate)
+    .replace(/\s+/g, ' ')               // Cleans up double spaces
+    .trim();                            // Trims leading/trailing whitespace
+}
+
 // ENHANCED Helper for robust Shopify API calls with more patient rate-limit handling
 async function shopifyRequestWithRetry(requestFn, ...args) {
     const maxRetries = 7; // Increased max retries
@@ -137,7 +147,6 @@ async function deduplicateProductsJob(token) {
         } else {
             addLog('No duplicate products found to delete.', 'success');
         }
-        // [+] NEW: Added a clear summary log at the end of the job.
         addLog(`Deduplication job complete: Deleted ${deletedCount} products. Errors: ${errors}.`, 'success');
     } catch (e) {
         addLog(`Critical error in deduplication job: ${e.message}`, 'error', e);
@@ -215,7 +224,6 @@ async function createNewProductsJob(token, { overrideFailsafe = false } = {}) {
         if (overrideFailsafe) addLog(`OVERRIDE: Proceeding with creating ${toCreate.length} products.`, 'warning');
 
         if (toCreate.length > 0) {
-            // [+] MODIFIED: Use overrideFailsafe to bypass the creation limit.
             const maxToCreate = overrideFailsafe ? toCreate.length : Math.min(toCreate.length, MAX_CREATE_PER_RUN);
             if (toCreate.length > maxToCreate && !overrideFailsafe) {
                 addLog(`Limiting creation to ${maxToCreate} products per run. To create all, approve the failsafe.`, 'warning');
@@ -225,8 +233,8 @@ async function createNewProductsJob(token, { overrideFailsafe = false } = {}) {
                 if (shouldAbort(token)) break;
                 const apifyProd = toCreate[i];
                 
-                // [+] NEW: Clean the title by removing anything in brackets.
-                const cleanedTitle = apifyProd.title.replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ').trim().replace(/\s+/g, ' ');
+                // [+] MODIFIED: Use the new dedicated function for robust title cleaning
+                const cleanedTitle = cleanProductTitle(apifyProd.title);
 
                 try {
                     const newProduct = { product: { 
@@ -248,7 +256,7 @@ async function createNewProductsJob(token, { overrideFailsafe = false } = {}) {
                     addLog(`Created product: "${cleanedTitle}" (SKU: ${apifyProd.sku}, Status: ${newProduct.product.status})`, 'success');
                 } catch (e) {
                     errors++;
-                    addLog(`Error creating product "${cleanedTitle}": ${e.message}`, 'error', e);
+                    addLog(`Error creating product "${cleanedTitle}" (Original: "${apifyProd.title}"): ${e.message}`, 'error', e);
                 }
                 await new Promise(r => setTimeout(r, 2000));
             }
@@ -283,7 +291,6 @@ async function handleDiscontinuedProductsJob(token, { overrideFailsafe = false }
         const apifySkus = new Set(processApifyProducts(apifyData, { processPrice: false }).map(p => p.sku.toLowerCase()));
         const supplierProducts = shopifyData.filter(p => p.tags && p.tags.includes(SUPPLIER_TAG));
         
-        // [+] NEW: Added clearer logging to explain the process.
         addLog(`Found ${apifySkus.size} unique SKUs in the latest Apify data.`, 'info');
         addLog(`Found ${supplierProducts.length} total Shopify products with tag '${SUPPLIER_TAG}'.`, 'info');
 
@@ -311,11 +318,9 @@ async function handleDiscontinuedProductsJob(token, { overrideFailsafe = false }
                     const variant = product.variants?.[0];
                     if (!variant) continue;
                     
-                    // Set inventory to 0 first
                     if (variant.inventory_item_id) { 
                         await shopifyRequestWithRetry(shopifyClient.post, '/inventory_levels/set.json', { inventory_item_id: variant.inventory_item_id, location_id: config.shopify.locationId, available: 0 }); 
                     } 
-                    // Then set status to draft
                     await shopifyRequestWithRetry(shopifyClient.put, `/products/${product.id}.json`, { product: { id: product.id, status: 'draft' } }); 
                     
                     discontinued++; 
