@@ -64,7 +64,7 @@ async function shopifyRequestWithRetry(requestFn, ...args) {
 async function getApifyProducts() { let allItems = []; let offset = 0; addLog('Starting Apify product fetch...', 'info'); try { while (true) { const { data } = await apifyClient.get(`/acts/${config.apify.actorId}/runs/last/dataset/items?token=${config.apify.token}&limit=1000&offset=${offset}`); if (!data || data.length === 0) break; allItems.push(...data); if (data.length < 1000) break; offset += 1000; } } catch (error) { addLog(`Apify fetch error: ${error.message}`, 'error', error); throw error; } addLog(`Apify fetch complete: ${allItems.length} total products.`, 'info'); return allItems; }
 async function getShopifyProducts({ fields = 'id,handle,title,variants,tags,status,created_at' } = {}) { let allProducts = []; addLog(`Starting Shopify fetch...`, 'info'); try { let url = `/products.json?limit=250&fields=${fields}`; while (url) { const response = await shopifyRequestWithRetry(shopifyClient.get, url); allProducts.push(...response.data.products); const linkHeader = response.headers.link; url = null; if (linkHeader) { const nextLink = linkHeader.split(',').find(s => s.includes('rel="next"')); if (nextLink) { const pageInfoMatch = nextLink.match(/page_info=([^>]+)>/); if (pageInfoMatch) url = `/products.json?limit=250&fields=${fields}&page_info=${pageInfoMatch[1]}`; } } await new Promise(r => setTimeout(r, 500)); } const activeCount = allProducts.filter(p => p.status === 'active').length; const draftCount = allProducts.filter(p => p.status === 'draft').length; const archivedCount = allProducts.filter(p => p.status === 'archived').length; addLog(`Shopify fetch complete: ${allProducts.length} total products (${activeCount} active, ${draftCount} draft, ${archivedCount} archived).`, 'info'); } catch (error) { addLog(`Shopify fetch error: ${error.message}`, 'error', error); throw error; } return allProducts; }
 async function getShopifyInventoryLevels(inventoryItemIds) { const inventoryMap = new Map(); if (!inventoryItemIds.length) return inventoryMap; try { for (let i = 0; i < inventoryItemIds.length; i += 50) { const chunk = inventoryItemIds.slice(i, i + 50); const { data } = await shopifyRequestWithRetry(shopifyClient.get, `/inventory_levels.json?inventory_item_ids=${chunk.join(',')}&location_ids=${config.shopify.locationId}`); for (const level of data.inventory_levels) { inventoryMap.set(level.inventory_item_id, level.available || 0); } await new Promise(r => setTimeout(r, 500)); } } catch (e) { addLog(`Error fetching inventory levels: ${e.message}`, 'error', e); } return inventoryMap; }
-function normalizeForMatching(text = '') { return String(text).toLowerCase().replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ').replace(/```math.*?```/gs, ' ').replace(/-parcel-large-letter-rate$/i, '').replace(/-p\d+$/i, '').replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }
+function normalizeForMatching(text = '') { return String(text).toLowerCase().replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ').replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ').replace(/```math.*?```/gs, ' ').replace(/-parcel-large-letter-rate$/i, '').replace(/-p\d+$/i, '').replace(/\b(a|an|the|of|in|on|at|to|for|with|by)\b/g, '').replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim(); }
 function calculateRetailPrice(supplierCostString) { const cost = parseFloat(supplierCostString); if (isNaN(cost) || cost < 0) return '0.00'; let finalPrice; if (cost <= 1) finalPrice = cost + 5.5; else if (cost <= 2) finalPrice = cost + 5.95; else if (cost <= 3) finalPrice = cost + 6.99; else if (cost <= 5) finalPrice = cost * 3.2; else if (cost <= 7) finalPrice = cost * 2.5; else if (cost <= 9) finalPrice = cost * 2.2; else if (cost <= 12) finalPrice = cost * 2; else if (cost <= 20) finalPrice = cost * 1.9; else finalPrice = cost * 1.8; return finalPrice.toFixed(2); }
 
 function processApifyProducts(apifyData, { processPrice = true } = {}) {
@@ -96,7 +96,55 @@ function processApifyProducts(apifyData, { processPrice = true } = {}) {
 function matchShopifyProductBySku(apifyProduct, skuMap) { const product = skuMap.get(apifyProduct.sku.toLowerCase()); return product ? { product, matchType: 'sku' } : { product: null, matchType: 'none' }; }
 
 // --- CORE JOB LOGIC ---
-async function deduplicateProductsJob(token) { addLog('--- Starting One-Time Duplicate Cleanup Job ---', 'warning'); let deletedCount = 0, errors = 0; try { const allShopifyProducts = await getShopifyProducts(); if (shouldAbort(token)) return; const productsByTitle = new Map(); for (const product of allShopifyProducts) { const normalized = normalizeForMatching(product.title); if (!productsByTitle.has(normalized)) productsByTitle.set(normalized, []); productsByTitle.get(normalized).push(product); } const toDeleteIds = []; for (const products of productsByTitle.values()) { if (products.length > 1) { addLog(`Found ${products.length} duplicates for title: "${products[0].title}"`, 'warning'); products.sort((a, b) => new Date(a.created_at) - new Date(b.created_at)); const toKeep = products.shift(); addLog(` Keeping ORIGINAL product ID ${toKeep.id} (created at ${toKeep.created_at})`, 'info'); products.forEach(p => { addLog(` Marking NEWER duplicate for deletion ID ${p.id} (created at ${p.created_at})`, 'info'); toDeleteIds.push(p.id); }); } } if (toDeleteIds.length > 0) { addLog(`Preparing to delete ${toDeleteIds.length} newer duplicate products...`, 'warning'); for (const id of toDeleteIds) { if (shouldAbort(token)) break; try { await shopifyRequestWithRetry(shopifyClient.delete, `/products/${id}.json`); deletedCount++; addLog(` ✓ Deleted product ID ${id}`, 'success'); } catch (e) { errors++; addLog(` ✗ Error deleting product ID ${id}: ${e.message}`, 'error', e); } } } else { addLog('No duplicate products found to delete.', 'success'); } } catch (e) { addLog(`Critical error in deduplication job: ${e.message}`, 'error', e); errors++; } lastRun.deduplicate = { at: new Date().toISOString(), deleted: deletedCount, errors }; }
+async function deduplicateProductsJob(token) {
+    addLog('--- Starting One-Time Duplicate Cleanup Job ---', 'warning');
+    let deletedCount = 0, errors = 0;
+    try {
+        const allShopifyProducts = await getShopifyProducts();
+        if (shouldAbort(token)) return;
+        const productsByTitle = new Map();
+        for (const product of allShopifyProducts) {
+            const normalized = normalizeForMatching(product.title);
+            if (!productsByTitle.has(normalized)) productsByTitle.set(normalized, []);
+            productsByTitle.get(normalized).push(product);
+        }
+        const toDeleteIds = [];
+        for (const products of productsByTitle.values()) {
+            if (products.length > 1) {
+                addLog(`Found ${products.length} duplicates for title: "${products[0].title}"`, 'warning');
+                products.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+                const toKeep = products.shift();
+                addLog(` Keeping ORIGINAL product ID ${toKeep.id} (created at ${toKeep.created_at})`, 'info');
+                products.forEach(p => {
+                    addLog(` Marking NEWER duplicate for deletion ID ${p.id} (created at ${p.created_at})`, 'info');
+                    toDeleteIds.push(p.id);
+                });
+            }
+        }
+        if (toDeleteIds.length > 0) {
+            addLog(`Preparing to delete ${toDeleteIds.length} newer duplicate products...`, 'warning');
+            for (const id of toDeleteIds) {
+                if (shouldAbort(token)) break;
+                try {
+                    await shopifyRequestWithRetry(shopifyClient.delete, `/products/${id}.json`);
+                    deletedCount++;
+                    addLog(` ✓ Deleted product ID ${id}`, 'success');
+                } catch (e) {
+                    errors++;
+                    addLog(` ✗ Error deleting product ID ${id}: ${e.message}`, 'error', e);
+                }
+            }
+        } else {
+            addLog('No duplicate products found to delete.', 'success');
+        }
+        // [+] NEW: Added a clear summary log at the end of the job.
+        addLog(`Deduplication job complete: Deleted ${deletedCount} products. Errors: ${errors}.`, 'success');
+    } catch (e) {
+        addLog(`Critical error in deduplication job: ${e.message}`, 'error', e);
+        errors++;
+    }
+    lastRun.deduplicate = { at: new Date().toISOString(), deleted: deletedCount, errors };
+}
 async function improvedMapSkusJob(token) { addLog(`--- Starting Comprehensive SKU Mapping Job with Debug Info ---`, 'warning'); let updated = 0, errors = 0, alreadyMatched = 0, noMatch = 0; let matchedByHandle = 0, matchedByTitle = 0, matchedByFuzzy = 0; let matchedByPartialSkuInSku = 0, matchedByPartialSkuInHandle = 0, matchedByPartialSkuInTitle = 0; let skippedNonSupplier = 0; try { const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts()]); if (shouldAbort(token)) return; const apifyProcessed = processApifyProducts(apifyData, { processPrice: false }); const apifySkuMap = new Map(); for (const apifyProd of apifyProcessed) { apifySkuMap.set(apifyProd.sku.toLowerCase(), apifyProd); } const supplierProducts = shopifyData.filter(p => p.tags && p.tags.includes(SUPPLIER_TAG)); addLog(`Found ${supplierProducts.length} Shopify products with tag '${SUPPLIER_TAG}' to process.`, 'info'); skippedNonSupplier = shopifyData.length - supplierProducts.length; const usedShopifyIds = new Set(); const usedApifySkus = new Set(); for (const shopifyProd of supplierProducts) { const variant = shopifyProd.variants?.[0]; if (!variant) continue; const shopifySku = variant.sku?.toLowerCase(); if (shopifySku && apifySkuMap.has(shopifySku)) { alreadyMatched++; usedShopifyIds.add(shopifyProd.id); usedApifySkus.add(shopifySku); } } addLog(`Found ${alreadyMatched} products already correctly mapped by SKU`, 'info'); const toProcess = supplierProducts.filter(p => !usedShopifyIds.has(p.id)); const updateCandidates = []; const remainingApifyProducts = apifyProcessed.filter(p => !usedApifySkus.has(p.sku.toLowerCase())); addLog(`Processing ${toProcess.length} products that need SKU mapping...`, 'info'); for (const shopifyProd of toProcess) { if (shouldAbort(token)) break; const shopifyVariant = shopifyProd.variants?.[0]; if (!shopifyVariant) continue; const shopifyNormalizedTitle = normalizeForMatching(shopifyProd.title); let bestMatch = null, matchType = ''; for (const apifyProd of remainingApifyProducts) { if (shopifyProd.handle.toLowerCase() === apifyProd.handle.toLowerCase()) { bestMatch = apifyProd; matchType = 'handle'; break; } } if (bestMatch) { matchedByHandle++; } else { for (const apifyProd of remainingApifyProducts) { if (shopifyNormalizedTitle === apifyProd.normalizedTitle) { bestMatch = apifyProd; matchType = 'title'; break; } } if (bestMatch) { matchedByTitle++; } else { const shopifySku = shopifyVariant.sku; if (shopifySku && /^\d+$/.test(shopifySku) && shopifySku.length >= 4) { for (const apifyProd of remainingApifyProducts) { if (apifyProd.sku.includes(shopifySku)) { bestMatch = apifyProd; matchType = 'partial-sku-in-full-sku'; matchedByPartialSkuInSku++; break; } if (apifyProd.handle.includes(shopifySku)) { bestMatch = apifyProd; matchType = 'partial-sku-in-handle'; matchedByPartialSkuInHandle++; break; } if (apifyProd.title.includes(shopifySku)) { bestMatch = apifyProd; matchType = 'partial-sku-in-title'; matchedByPartialSkuInTitle++; break; } } } if(!bestMatch) { let maxOverlap = 70; for (const apifyProd of remainingApifyProducts) { const overlap = getWordOverlap(shopifyNormalizedTitle, apifyProd.normalizedTitle); if (overlap > maxOverlap) { maxOverlap = overlap; bestMatch = apifyProd; matchType = `fuzzy-${Math.round(maxOverlap)}%`; } } if (bestMatch) { matchedByFuzzy++; } } } } if (bestMatch) { const variant = shopifyProd.variants?.[0]; if (!variant) continue; updateCandidates.push({ variantId: variant.id, oldSku: variant.sku || '(none)', newSku: bestMatch.sku, title: shopifyProd.title, matchType }); const index = remainingApifyProducts.findIndex(p => p.sku === bestMatch.sku); if (index !== -1) remainingApifyProducts.splice(index, 1); } else { noMatch++; } } addLog(`SKU mapping summary:`, 'info'); addLog(`- Already matched: ${alreadyMatched}`, 'info'); addLog(`- Matched by handle: ${matchedByHandle}`, 'info'); addLog(`- Matched by title: ${matchedByTitle}`, 'info'); addLog(`- Matched by Partial SKU (in SKU/Handle/Title): ${matchedByPartialSkuInSku}/${matchedByPartialSkuInHandle}/${matchedByPartialSkuInTitle}`, 'info'); addLog(`- Matched by fuzzy: ${matchedByFuzzy}`, 'info'); addLog(`- Total to update: ${updateCandidates.length}`, 'info'); addLog(`- No match found: ${noMatch}`, 'info'); if (updateCandidates.length > 0) { addLog(`Examples of SKUs to update:`, 'warning'); for (let i = 0; i < Math.min(5, updateCandidates.length); i++) { const item = updateCandidates[i]; addLog(`  - [${item.matchType}] "${item.title}": ${item.oldSku} -> ${item.newSku}`, 'warning'); } for (const item of updateCandidates) { if (shouldAbort(token)) break; try { await shopifyRequestWithRetry(shopifyClient.put, `/variants/${item.variantId}.json`, { variant: { id: item.variantId, sku: item.newSku } }); updated++; addLog(`Updated SKU for "${item.title}" from ${item.oldSku} to ${item.newSku} (${item.matchType})`, 'success'); } catch (e) { errors++; addLog(`Error updating SKU for "${item.title}": ${e.message}`, 'error', e); } } } addLog(`SKU mapping complete: Updated ${updated}, Errors ${errors}, Already matched ${alreadyMatched}, No match ${noMatch}`, 'success'); } catch (e) { addLog(`Critical error in SKU mapping job: ${e.message}`, 'error', e); errors++; } lastRun.mapSkus = { at: new Date().toISOString(), updated, errors, alreadyMatched, noMatch, matchedByHandle, matchedByTitle, matchedByPartialSkuInSku, matchedByPartialSkuInHandle, matchedByPartialSkuInTitle, matchedByFuzzy, skippedNonSupplier }; }
 async function updateInventoryJob(token, { overrideFailsafe = false } = {}) {
     addLog('Starting inventory sync (SKU-only)...', 'info');
@@ -167,26 +215,41 @@ async function createNewProductsJob(token, { overrideFailsafe = false } = {}) {
         if (overrideFailsafe) addLog(`OVERRIDE: Proceeding with creating ${toCreate.length} products.`, 'warning');
 
         if (toCreate.length > 0) {
-            const maxToCreate = Math.min(toCreate.length, MAX_CREATE_PER_RUN);
-            if (toCreate.length > maxToCreate) addLog(`Limiting creation to ${maxToCreate} products per run.`, 'warning');
+            // [+] MODIFIED: Use overrideFailsafe to bypass the creation limit.
+            const maxToCreate = overrideFailsafe ? toCreate.length : Math.min(toCreate.length, MAX_CREATE_PER_RUN);
+            if (toCreate.length > maxToCreate && !overrideFailsafe) {
+                addLog(`Limiting creation to ${maxToCreate} products per run. To create all, approve the failsafe.`, 'warning');
+            }
+            
             for (let i = 0; i < maxToCreate; i++) {
                 if (shouldAbort(token)) break;
                 const apifyProd = toCreate[i];
+                
+                // [+] NEW: Clean the title by removing anything in brackets.
+                const cleanedTitle = apifyProd.title.replace(/\s*KATEX_INLINE_OPEN.*?KATEX_INLINE_CLOSE\s*/g, ' ').trim().replace(/\s+/g, ' ');
+
                 try {
-                    const newProduct = { product: { title: apifyProd.title, body_html: apifyProd.body_html || '', vendor: 'Imported', tags: SUPPLIER_TAG, status: apifyProd.inventory > 0 ? 'active' : 'draft', variants: [{ price: apifyProd.price, sku: apifyProd.sku, inventory_management: 'shopify' }], images: apifyProd.images } };
+                    const newProduct = { product: { 
+                        title: cleanedTitle, // Use the cleaned title
+                        body_html: apifyProd.body_html || '', 
+                        vendor: 'Imported', 
+                        tags: SUPPLIER_TAG, 
+                        status: apifyProd.inventory > 0 ? 'active' : 'draft', 
+                        variants: [{ price: apifyProd.price, sku: apifyProd.sku, inventory_management: 'shopify' }], 
+                        images: apifyProd.images 
+                    }};
                     const { data } = await shopifyRequestWithRetry(shopifyClient.post, '/products.json', newProduct);
                     const inventoryItemId = data.product.variants[0].inventory_item_id;
                     if (inventoryItemId) {
                        await shopifyRequestWithRetry(shopifyClient.post, '/inventory_levels/set.json', { inventory_item_id: inventoryItemId, location_id: config.shopify.locationId, available: apifyProd.inventory });
                     }
                     created++;
-                    createdItems.push({ id: data.product.id, title: apifyProd.title, sku: apifyProd.sku });
-                    addLog(`Created product: "${apifyProd.title}" (SKU: ${apifyProd.sku}, Status: ${newProduct.product.status})`, 'success');
+                    createdItems.push({ id: data.product.id, title: cleanedTitle, sku: apifyProd.sku });
+                    addLog(`Created product: "${cleanedTitle}" (SKU: ${apifyProd.sku}, Status: ${newProduct.product.status})`, 'success');
                 } catch (e) {
                     errors++;
-                    addLog(`Error creating product "${apifyProd.title}": ${e.message}`, 'error', e);
+                    addLog(`Error creating product "${cleanedTitle}": ${e.message}`, 'error', e);
                 }
-                // PROACTIVE DELAY to prevent hitting rate limits
                 await new Promise(r => setTimeout(r, 2000));
             }
             skipped = toCreate.length - created;
@@ -216,10 +279,23 @@ async function handleDiscontinuedProductsJob(token, { overrideFailsafe = false }
     try {
         const [apifyData, shopifyData] = await Promise.all([getApifyProducts(), getShopifyProducts({ fields: 'id,title,variants,tags,status' })]);
         if (shouldAbort(token)) return;
+        
         const apifySkus = new Set(processApifyProducts(apifyData, { processPrice: false }).map(p => p.sku.toLowerCase()));
         const supplierProducts = shopifyData.filter(p => p.tags && p.tags.includes(SUPPLIER_TAG));
-        const potentialDiscontinued = supplierProducts.filter(p => { const sku = p.variants?.[0]?.sku?.toLowerCase(); return sku && !apifySkus.has(sku) && p.status === 'active'; });
-        addLog(`Found ${potentialDiscontinued.length} potentially discontinued products.`, 'info');
+        
+        // [+] NEW: Added clearer logging to explain the process.
+        addLog(`Found ${apifySkus.size} unique SKUs in the latest Apify data.`, 'info');
+        addLog(`Found ${supplierProducts.length} total Shopify products with tag '${SUPPLIER_TAG}'.`, 'info');
+
+        const activeSupplierProducts = supplierProducts.filter(p => p.status === 'active');
+        addLog(`Checking ${activeSupplierProducts.length} of them which are 'active' against Apify SKUs...`, 'info');
+
+        const potentialDiscontinued = activeSupplierProducts.filter(p => {
+            const sku = p.variants?.[0]?.sku?.toLowerCase();
+            return sku && !apifySkus.has(sku);
+        });
+        
+        addLog(`Found ${potentialDiscontinued.length} active products in Shopify that are no longer in the Apify data. These will be set to 0 inventory and moved to Draft.`, 'info');
         
         if (potentialDiscontinued.length > 0) {
             const discontinuePercentage = supplierProducts.length > 0 ? (potentialDiscontinued.length / supplierProducts.length) * 100 : 0;
@@ -229,7 +305,27 @@ async function handleDiscontinuedProductsJob(token, { overrideFailsafe = false }
             }
             if(overrideFailsafe) addLog(`OVERRIDE: Proceeding with discontinuing ${potentialDiscontinued.length} products.`, 'warning');
 
-            for (const product of potentialDiscontinued) { if (shouldAbort(token)) break; try { const inventoryItemId = product.variants[0].inventory_item_id; if (inventoryItemId) { await shopifyRequestWithRetry(shopifyClient.post, '/inventory_levels/set.json', { inventory_item_id: inventoryItemId, location_id: config.shopify.locationId, available: 0 }); } await shopifyRequestWithRetry(shopifyClient.put, `/products/${product.id}.json`, { product: { id: product.id, status: 'draft' } }); discontinued++; discontinuedItems.push({ id: product.id, title: product.title, sku: product.variants[0].sku }); addLog(`Discontinued product: "${product.title}" (SKU: ${product.variants[0].sku})`, 'success'); } catch (e) { errors++; addLog(`Error discontinuing product "${product.title}": ${e.message}`, 'error', e); } }
+            for (const product of potentialDiscontinued) { 
+                if (shouldAbort(token)) break; 
+                try { 
+                    const variant = product.variants?.[0];
+                    if (!variant) continue;
+                    
+                    // Set inventory to 0 first
+                    if (variant.inventory_item_id) { 
+                        await shopifyRequestWithRetry(shopifyClient.post, '/inventory_levels/set.json', { inventory_item_id: variant.inventory_item_id, location_id: config.shopify.locationId, available: 0 }); 
+                    } 
+                    // Then set status to draft
+                    await shopifyRequestWithRetry(shopifyClient.put, `/products/${product.id}.json`, { product: { id: product.id, status: 'draft' } }); 
+                    
+                    discontinued++; 
+                    discontinuedItems.push({ id: product.id, title: product.title, sku: variant.sku }); 
+                    addLog(`Discontinued product: "${product.title}" (SKU: ${variant.sku}) - Set to 0 inventory and status to Draft.`, 'success'); 
+                } catch (e) { 
+                    errors++; 
+                    addLog(`Error discontinuing product "${product.title}": ${e.message}`, 'error', e); 
+                } 
+            }
             skipped = potentialDiscontinued.length - discontinued;
         } else { addLog('No products to discontinue.', 'success'); }
         stats.discontinued += discontinued;
