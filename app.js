@@ -38,15 +38,27 @@ async function notifyTelegram(text) { if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_
 function startBackgroundJob(key, name, fn) { if (jobLocks[key]) { addLog(`${name} already running; ignoring duplicate start`, 'warning'); return false; } if (failsafeTriggered) { addLog(`System in failsafe mode. Cannot start job: ${name}`, 'warning'); return false; } jobLocks[key] = true; const token = getJobToken(); addLog(`Started background job: ${name}`, 'info'); setImmediate(async () => { try { await fn(token); } catch (e) { addLog(`Unhandled error in ${name}: ${e.message}\n${e.stack}`, 'error', e); } finally { jobLocks[key] = false; addLog(`${name} job finished`, 'info'); } }); return true; }
 function getWordOverlap(str1, str2) { const words1 = new Set(str1.split(' ')); const words2 = new Set(str2.split(' ')); const intersection = new Set([...words1].filter(x => words2.has(x))); return (intersection.size / Math.max(words1.size, words2.size)) * 100; }
 
-// [+] FINALLY CORRECTED & ROBUST HELPER FUNCTION: Cleans product titles for display
+// [+] NEW METHOD: A list of patterns to remove from titles.
+const TITLE_CLEANUP_PATTERNS = [
+    /\s*KATEX_INLINE_OPEN[^)]*KATEX_INLINE_CLOSE\s*/g,                      // Pattern 1: CORRECTLY removes any text inside parentheses, e.g., "(Parcel Rate)"
+    /\b[A-Z]{1,3}-?\d{4,}[A-Z]?\b/gi,         // Pattern 2: Removes complex SKUs like SK28659, ST80056, DE-8335C
+    /\b\d{4,}\b/g                             // Pattern 3: Removes standalone 4+ digit numbers like 1087
+];
+
+// [+] NEW METHOD: A robust function that iterates through the patterns.
 function cleanProductTitle(title) {
-  if (!title) return '';
-  return title
-    .replace(/\s*KATEX_INLINE_OPEN[^)]*KATEX_INLINE_CLOSE\s*/g, ' ')      // THIS IS THE FIX: Properly removes text in parentheses
-    .replace(/\b[A-Z]{0,2}-?\d{4,}[A-Z]?\b/gi, '') // Removes codes like R38864, 1433, SK28659, or DE-8335C
-    .replace(/\s+/g, ' ')               // Cleans up double spaces
-    .trim();                            // Trims leading/trailing whitespace
+    if (!title) return '';
+    let cleanedTitle = title;
+    
+    // Sequentially apply each cleanup pattern
+    TITLE_CLEANUP_PATTERNS.forEach(pattern => {
+        cleanedTitle = cleanedTitle.replace(pattern, ' ');
+    });
+
+    // Final cleanup of extra spaces
+    return cleanedTitle.replace(/\s+/g, ' ').trim();
 }
+
 
 // ENHANCED Helper for robust Shopify API calls with more patient rate-limit handling
 async function shopifyRequestWithRetry(requestFn, ...args) {
