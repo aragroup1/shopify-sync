@@ -1305,3 +1305,179 @@ app.get('/', (req, res) => {
   const status = systemPaused ? 'PAUSED' : (failsafeTriggered ? 'FAILSAFE' : 'RUNNING');
   const pendingCount = pendingDiscontinue.size;
   res.send(`<!DOCTYPE html><html><head><title>Shopify Sync</title><meta name="viewport" content="width=device-width, initial-scale=1"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"><style>:root{--primary-color:#4361ee;--secondary-color:#3a0ca3;--success-color:#4cc9f0;--warning-color:#f72585;--info-color:#4895ef;--light-color:#f8f9fa;--dark-color:#212529}body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;background-color:#f7f7f9;color:#333;line-height:1.6;padding:0;margin:0}.navbar{background:linear-gradient(90deg,var(--primary-color),var(--secondary-color));box-shadow:0 4px 12px rgba(0,0,0,.1);padding:1rem 2rem;color:white;margin-bottom:2rem}.navbar h1{margin:0;font-weight:700;font-size:1.5rem}.card{border:none;border-radius:12px;box-shadow:0 5px 15px rgba(0,0,0,.05);transition:transform .3s,box-shadow .3s;margin-bottom:25px;overflow:hidden}.card:hover{transform:translateY(-5px);box-shadow:0 10px 20px rgba(0,0,0,.1)}.card-header{background:white;padding:1.25rem 1.5rem;font-weight:600;border-bottom:1px solid rgba(0,0,0,.05);display:flex;align-items:center;justify-content:space-between}.card-body{padding:1.5rem}.status-badge{font-size:.9rem;padding:.5rem 1rem;border-radius:50px;font-weight:500;text-transform:uppercase;letter-spacing:.5px;box-shadow:0 3px 8px rgba(0,0,0,.1)}.btn{border-radius:50px;padding:.6rem 1.5rem;font-weight:500;text-transform:capitalize;letter-spacing:.3px;transition:all .3s;box-shadow:0 3px 6px rgba(0,0,0,.1);margin:.25rem}.btn:hover{transform:translateY(-2px);box-shadow:0 5px 10px rgba(0,0,0,.15)}.btn i{margin-right:5px}.btn-primary{background:linear-gradient(45deg,var(--primary-color),var(--info-color));border:none}.btn-warning{background:linear-gradient(45deg,#f72585,#ff9e00);border:none;color:white}.btn-success{background:linear-gradient(45deg,#06d6a0,#1b9aaa);border:none}.btn-danger{background:linear-gradient(45deg,#ef476f,#ffd166);border:none}.btn-secondary{background:linear-gradient(45deg,#8338ec,#3a86ff);border:none;color:white}.stat-card{padding:1rem;border-radius:10px;box-shadow:0 3px 10px rgba(0,0,0,.05);background:white;text-align:center;transition:all .3s}.stat-card:hover{transform:translateY(-3px);box-shadow:0 5px 15px rgba(0,0,0,.1)}.stat-card h3{font-size:2rem;font-weight:700;margin:.5rem 0;background:linear-gradient(45deg,var(--primary-color),var(--info-color));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}.stat-card p{margin:0;font-size:.9rem;color:#6c757d;font-weight:500}.logs-container{max-height:500px;overflow-y:auto;border-radius:8px;background:#f8f9fa;padding:1rem}.log-entry{padding:.75rem 1rem;margin-bottom:.5rem;border-radius:6px;background:white;box-shadow:0 2px 5px rgba(0,0,0,.02);border-left:4px solid #dee2e6;font-size:.9rem}.log-entry small{display:block;font-size:.75rem;opacity:.7;margin-bottom:.25rem}.log-error{border-left-color:#ef476f;background:#fff5f7}.log-warning{border-left-color:#ffd166;background:#fff9eb}.log-success{border-left-color:#06d6a0;background:#f0fff4}.alert{border-radius:10px;padding:1rem 1.5rem;border:none;box-shadow:0 3px 10px rgba(0,0,0,.05)}.bg-running{background:linear-gradient(-45deg,#06d6a0,#1b9aaa,#4cc9f0,#3a86ff);background-size:400% 400%;animation:gradient 3s ease infinite}.bg-paused{background:linear-gradient(-45deg,#ffd166,#ffbd00,#ff9e00,#ff7700);background-size:400% 400%;animation:gradient 3s ease infinite}.bg-failsafe{background:linear-gradient(-45deg,#ef476f,#f72585,#b5179e,#7209b7);background-size:400% 400%;animation:gradient 3s ease infinite}@keyframes gradient{0%{background-position:0 50%}50%{background-position:100% 50%}100%{background-position:0 50%}}.fetch-health{background:#f8f9fa;padding:1rem;border-radius:8px;font-size:.85rem}.pending-badge{background:linear-gradient(45deg,#ffd166,#ff9e00);color:white;padding:.25rem .75rem;border-radius:20px;font-size:.8rem;font-weight:600}</style></head><body><nav class="navbar"><div class="container-fluid"><h1><i class="fas fa-sync-alt me-2"></i> Shopify Sync Dashboard</h1></div></nav><div class="container"><div class="row mb-4"><div class="col-md-6"><div class="card"><div class="card-header"><h5 class="mb-0"><i class="fas fa-tachometer-alt me-2"></i>System Status</h5><span class="badge ${status==='RUNNING'?'bg-running':status==='PAUSED'?'bg-paused':'bg-failsafe'} status-badge"><i
+
+
+// ... (continue from previous code)
+
+// --- UI AND API --- (Complete version)
+app.get('/', (req, res) => {
+  const status = systemPaused ? 'PAUSED' : (failsafeTriggered ? 'FAILSAFE' : 'RUNNING');
+  const pendingCount = pendingDiscontinue.size;
+  res.send(`<!DOCTYPE html><html><head><title>Shopify Sync</title><meta name="viewport" content="width=device-width, initial-scale=1"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"><style>:root{--primary-color:#4361ee;--secondary-color:#3a0ca3;--success-color:#4cc9f0;--warning-color:#f72585;--info-color:#4895ef;--light-color:#f8f9fa;--dark-color:#212529}body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;background-color:#f7f7f9;color:#333;line-height:1.6;padding:0;margin:0}.navbar{background:linear-gradient(90deg,var(--primary-color),var(--secondary-color));box-shadow:0 4px 12px rgba(0,0,0,.1);padding:1rem 2rem;color:white;margin-bottom:2rem}.navbar h1{margin:0;font-weight:700;font-size:1.5rem}.card{border:none;border-radius:12px;box-shadow:0 5px 15px rgba(0,0,0,.05);transition:transform .3s,box-shadow .3s;margin-bottom:25px;overflow:hidden}.card:hover{transform:translateY(-5px);box-shadow:0 10px 20px rgba(0,0,0,.1)}.card-header{background:white;padding:1.25rem 1.5rem;font-weight:600;border-bottom:1px solid rgba(0,0,0,.05);display:flex;align-items:center;justify-content:space-between}.card-body{padding:1.5rem}.status-badge{font-size:.9rem;padding:.5rem 1rem;border-radius:50px;font-weight:500;text-transform:uppercase;letter-spacing:.5px;box-shadow:0 3px 8px rgba(0,0,0,.1)}.btn{border-radius:50px;padding:.6rem 1.5rem;font-weight:500;text-transform:capitalize;letter-spacing:.3px;transition:all .3s;box-shadow:0 3px 6px rgba(0,0,0,.1);margin:.25rem}.btn:hover{transform:translateY(-2px);box-shadow:0 5px 10px rgba(0,0,0,.15)}.btn i{margin-right:5px}.btn-primary{background:linear-gradient(45deg,var(--primary-color),var(--info-color));border:none}.btn-warning{background:linear-gradient(45deg,#f72585,#ff9e00);border:none;color:white}.btn-success{background:linear-gradient(45deg,#06d6a0,#1b9aaa);border:none}.btn-danger{background:linear-gradient(45deg,#ef476f,#ffd166);border:none}.btn-secondary{background:linear-gradient(45deg,#8338ec,#3a86ff);border:none;color:white}.stat-card{padding:1rem;border-radius:10px;box-shadow:0 3px 10px rgba(0,0,0,.05);background:white;text-align:center;transition:all .3s}.stat-card:hover{transform:translateY(-3px);box-shadow:0 5px 15px rgba(0,0,0,.1)}.stat-card h3{font-size:2rem;font-weight:700;margin:.5rem 0;background:linear-gradient(45deg,var(--primary-color),var(--info-color));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}.stat-card p{margin:0;font-size:.9rem;color:#6c757d;font-weight:500}.logs-container{max-height:500px;overflow-y:auto;border-radius:8px;background:#f8f9fa;padding:1rem}.log-entry{padding:.75rem 1rem;margin-bottom:.5rem;border-radius:6px;background:white;box-shadow:0 2px 5px rgba(0,0,0,.02);border-left:4px solid #dee2e6;font-size:.9rem}.log-entry small{display:block;font-size:.75rem;opacity:.7;margin-bottom:.25rem}.log-error{border-left-color:#ef476f;background:#fff5f7}.log-warning{border-left-color:#ffd166;background:#fff9eb}.log-success{border-left-color:#06d6a0;background:#f0fff4}.alert{border-radius:10px;padding:1rem 1.5rem;border:none;box-shadow:0 3px 10px rgba(0,0,0,.05)}.bg-running{background:linear-gradient(-45deg,#06d6a0,#1b9aaa,#4cc9f0,#3a86ff);background-size:400% 400%;animation:gradient 3s ease infinite}.bg-paused{background:linear-gradient(-45deg,#ffd166,#ffbd00,#ff9e00,#ff7700);background-size:400% 400%;animation:gradient 3s ease infinite}.bg-failsafe{background:linear-gradient(-45deg,#ef476f,#f72585,#b5179e,#7209b7);background-size:400% 400%;animation:gradient 3s ease infinite}@keyframes gradient{0%{background-position:0 50%}50%{background-position:100% 50%}100%{background-position:0 50%}}.fetch-health{background:#f8f9fa;padding:1rem;border-radius:8px;font-size:.85rem}.pending-badge{background:linear-gradient(45deg,#ffd166,#ff9e00);color:white;padding:.25rem .75rem;border-radius:20px;font-size:.8rem;font-weight:600}</style></head><body><nav class="navbar"><div class="container-fluid"><h1><i class="fas fa-sync-alt me-2"></i> Shopify Sync Dashboard</h1></div></nav><div class="container"><div class="row mb-4"><div class="col-md-6"><div class="card"><div class="card-header"><h5 class="mb-0"><i class="fas fa-tachometer-alt me-2"></i>System Status</h5><span class="badge ${status==='RUNNING'?'bg-running':status==='PAUSED'?'bg-paused':'bg-failsafe'} status-badge"><i class="fas ${status==='RUNNING'?'fa-play-circle':status==='PAUSED'?'fa-pause-circle':'fa-exclamation-triangle'} me-1"></i>${status}</span></div><div class="card-body"><div class="row mb-4"><div class="col-6 col-md-3"><div class="stat-card"><p>New Products</p><h3>${stats.newProducts}</h3></div></div><div class="col-6 col-md-3"><div class="stat-card"><p>Inventory Updates</p><h3>${stats.inventoryUpdates}</h3></div></div><div class="col-6 col-md-3"><div class="stat-card"><p>Discontinued</p><h3>${stats.discontinued}</h3></div></div><div class="col-6 col-md-3"><div class="stat-card"><p>Errors</p><h3>${stats.errors}</h3></div></div></div>${pendingCount > 0 ? `<div class="alert alert-warning"><i class="fas fa-clock me-2"></i><strong>${pendingCount} products pending discontinuation</strong><br><small>These will be discontinued if still missing after ${FETCH_VALIDATION.PENDING_DISCONTINUE_HOURS} hours</small></div>` : ''}<div class="fetch-health"><strong>Validation Settings:</strong><br>Apify: ${FETCH_VALIDATION.MIN_APIFY_PRODUCTS}-${FETCH_VALIDATION.MAX_APIFY_PRODUCTS} products<br>Shopify Supplier: Min ${FETCH_VALIDATION.MIN_SHOPIFY_SUPPLIER_PRODUCTS} products<br>Required Match: ${FETCH_VALIDATION.REQUIRED_MATCH_PERCENTAGE}%<br>Data Age Limit: ${FETCH_VALIDATION.MAX_DATA_AGE_HOURS} hours<br>Discontinue Delay: ${FETCH_VALIDATION.PENDING_DISCONTINUE_HOURS} hours<br>${CORE_SKUS.length > 0 ? `Core SKUs: ${CORE_SKUS.length} configured` : 'Core SKUs: Not configured'}</div><div class="d-flex flex-wrap justify-content-center gap-2 mt-3">${systemPaused?`<button class="btn btn-success" onclick="fetch('/api/pause',{method:'POST',body:JSON.stringify({paused:!1}),headers:{'Content-Type':'application/json'}}).then(()=>location.reload())"><i class="fas fa-play"></i> Resume System</button>`:`<button class="btn btn-warning" onclick="fetch('/api/pause',{method:'POST',body:JSON.stringify({paused:!0}),headers:{'Content-Type':'application/json'}}).then(()=>location.reload())"><i class="fas fa-pause"></i> Pause System</button>`}<button class="btn btn-secondary" onclick="if(confirm('Update baseline expectations for product counts?')) showBaselineModal()"><i class="fas fa-cog"></i> Update Baselines</button></div>${failsafeTriggered?`<div class="alert alert-danger mt-3 text-center"><h5 class="alert-heading"><i class="fas fa-exclamation-triangle me-2"></i>FAILSAFE TRIGGERED</h5><p>${failsafeReason}</p><hr><p class="mb-0">You must resolve this before the system can continue.</p><div class="d-flex justify-content-center gap-2 mt-3"><button class="btn btn-success" onclick="fetch('/api/failsafe/confirm',{method:'POST'}).then(()=>location.reload())"><i class="fas fa-check-circle"></i> Proceed Anyway</button><button class="btn btn-danger" onclick="fetch('/api/failsafe/abort',{method:'POST'}).then(()=>location.reload())"><i class="fas fa-times-circle"></i> Abort & Clear Failsafe</button></div></div>`:``}</div></div></div><div class="col-md-6"><div class="card"><div class="card-header"><h5 class="mb-0"><i class="fas fa-tools me-2"></i>Manual Actions</h5></div><div class="card-body"><div class="d-flex flex-wrap justify-content-center gap-2"><button class="btn btn-warning" onclick="runSync('improved-map-skus')" ${failsafeTriggered ? 'disabled' : ''}><i class="fas fa-map-signs"></i> Comprehensive SKU Mapping</button><button class="btn btn-primary" onclick="runSync('inventory')" ${failsafeTriggered ? 'disabled' : ''}><i class="fas fa-boxes"></i> Sync Inventory</button><button class="btn btn-primary" onclick="runSync('products')" ${failsafeTriggered ? 'disabled' : ''}><i class="fas fa-plus-circle"></i> Sync New Products</button><button class="btn btn-primary" onclick="runSync('discontinued')" ${failsafeTriggered ? 'disabled' : ''}><i class="fas fa-archive"></i> Check Discontinued</button><button class="btn btn-secondary" onclick="runSync('deduplicate')" ${failsafeTriggered ? 'disabled' : ''}><i class="fas fa-clone"></i> Find & Delete Duplicates</button><button class="btn btn-danger" onclick="if(confirm('DANGER: This will permanently delete all supplier products that cannot be matched. This cannot be undone. Are you sure you want to proceed?')) runSync('cleanse-unmatched')" ${failsafeTriggered ? 'disabled' : ''}><i class="fas fa-trash-alt"></i> Cleanse Unmatched Products</button></div></div></div></div></div><div class="row"><div class="col-md-12"><div class="card"><div class="card-header"><h5 class="mb-0"><i class="fas fa-list-alt me-2"></i>Logs</h5></div><div class="card-body"><div class="logs-container">${logs.map(log=>`<div class="log-entry ${log.type==='error'?'log-error':log.type==='warning'?'log-warning':log.type==='success'?'log-success':''}"><small>${new Date(log.timestamp).toLocaleString()}</small><span>${log.message}</span></div>`).join('')}</div></div></div></div></div></div><div class="modal fade" id="baselineModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Update Baseline Expectations</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><form id="baselineForm"><div class="mb-3"><label class="form-label">Min Apify Products</label><input type="number" class="form-control" id="minApify" value="${FETCH_VALIDATION.MIN_APIFY_PRODUCTS}"></div><div class="mb-3"><label class="form-label">Max Apify Products</label><input type="number" class="form-control" id="maxApify" value="${FETCH_VALIDATION.MAX_APIFY_PRODUCTS}"></div><div class="mb-3"><label class="form-label">Min Shopify Supplier Products</label><input type="number" class="form-control" id="minShopify" value="${FETCH_VALIDATION.MIN_SHOPIFY_SUPPLIER_PRODUCTS}"></div></form></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="button" class="btn btn-primary" onclick="updateBaselines()">Update</button></div></div></div></div><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script><script>function runSync(t){fetch("/api/sync/"+t,{method:"POST"}).then(t=>t.json()).then(t=>{1===t.s?(alert("Job started successfully!"),setTimeout(()=>location.reload(),1e3)):alert(t.msg||"Job already running. Try again later.")}).catch(t=>{alert("Error: "+t)})}function showBaselineModal(){new bootstrap.Modal(document.getElementById('baselineModal')).show()}function updateBaselines(){const data={minApify:document.getElementById('minApify').value,maxApify:document.getElementById('maxApify').value,minShopify:document.getElementById('minShopify').value};fetch('/api/update-baseline',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.json()).then(r=>{if(r.success){alert('Baselines updated successfully!');location.reload()}else{alert('Failed to update baselines: '+(r.error||'Unknown error'))}}).catch(e=>alert('Error: '+e))}setTimeout(()=>location.reload(),3e4);</script></body></html>`);
+});
+
+app.get('/api/status', (req, res) => res.json({ 
+    stats, 
+    lastRun, 
+    logs, 
+    systemPaused, 
+    failsafeTriggered, 
+    failsafeReason, 
+    errorSummary: Array.from(errorSummary.entries()).map(([msg, count]) => ({msg, count})),
+    fetchHistory,
+    fetchValidation: FETCH_VALIDATION,
+    pendingDiscontinue: Array.from(pendingDiscontinue.entries()).map(([key, value]) => ({
+        key,
+        ...value,
+        hoursElapsed: ((Date.now() - value.timestamp) / (60 * 60 * 1000)).toFixed(1)
+    })),
+    dataChecksums,
+    coreSkus: CORE_SKUS
+}));
+
+app.get('/api/fetch-health', (req, res) => {
+    res.json({
+        fetchHistory,
+        dataChecksums,
+        validation: {
+            minApifyProducts: FETCH_VALIDATION.MIN_APIFY_PRODUCTS,
+            maxApifyProducts: FETCH_VALIDATION.MAX_APIFY_PRODUCTS,
+            minShopifySupplierProducts: FETCH_VALIDATION.MIN_SHOPIFY_SUPPLIER_PRODUCTS,
+            requiredMatchPercentage: FETCH_VALIDATION.REQUIRED_MATCH_PERCENTAGE,
+            maxDataAgeHours: FETCH_VALIDATION.MAX_DATA_AGE_HOURS,
+            pendingDiscontinueHours: FETCH_VALIDATION.PENDING_DISCONTINUE_HOURS
+        },
+        pendingDiscontinueCount: pendingDiscontinue.size,
+        coreSkusConfigured: CORE_SKUS.length
+    });
+});
+
+app.post('/api/update-baseline', (req, res) => {
+    const { minApify, maxApify, minShopify } = req.body;
+    
+    if (!minApify || !maxApify || !minShopify) {
+        return res.status(400).json({ success: false, error: 'Missing required parameters' });
+    }
+    
+    const newMinApify = Number(minApify);
+    const newMaxApify = Number(maxApify);
+    const newMinShopify = Number(minShopify);
+    
+    if (newMinApify >= newMaxApify) {
+        return res.status(400).json({ success: false, error: 'Min Apify must be less than Max Apify' });
+    }
+    
+    FETCH_VALIDATION.MIN_APIFY_PRODUCTS = newMinApify;
+    FETCH_VALIDATION.MAX_APIFY_PRODUCTS = newMaxApify;
+    FETCH_VALIDATION.MIN_SHOPIFY_SUPPLIER_PRODUCTS = newMinShopify;
+    
+    addLog(`Baseline expectations updated: Apify ${newMinApify}-${newMaxApify}, Shopify min ${newMinShopify}`, 'warning');
+    
+    res.json({ 
+        success: true, 
+        newValues: {
+            minApifyProducts: newMinApify,
+            maxApifyProducts: newMaxApify,
+            minShopifySupplierProducts: newMinShopify
+        }
+    });
+});
+
+app.post('/api/pause', (req, res) => { 
+    const { paused } = req.body; 
+    if (paused === undefined) return res.status(400).json({ s: 0, msg: 'Missing paused parameter' }); 
+    systemPaused = Boolean(paused); 
+    addLog(`System ${systemPaused ? 'paused' : 'resumed'} by user`, 'warning'); 
+    if (!systemPaused) { abortVersion++; } 
+    return res.json({ s: 1 }); 
+});
+
+app.post('/api/failsafe/confirm', (req, res) => {
+    if (!failsafeTriggered || !pendingFailsafeAction) {
+        return res.status(400).json({ s: 0, msg: 'No pending failsafe action to confirm.' });
+    }
+    addLog('Failsafe action confirmed by user. Proceeding with override...', 'warning');
+    const actionToRun = pendingFailsafeAction;
+    failsafeTriggered = false;
+    failsafeReason = '';
+    pendingFailsafeAction = null;
+    abortVersion++;
+    actionToRun();
+    return res.json({ s: 1 });
+});
+
+app.post('/api/failsafe/abort', (req, res) => {
+    if (!failsafeTriggered) {
+        return res.status(400).json({ s: 0, msg: 'No failsafe is currently triggered.' });
+    }
+    addLog('Failsafe aborted by user. System returning to normal.', 'warning');
+    failsafeTriggered = false;
+    failsafeReason = '';
+    pendingFailsafeAction = null;
+    abortVersion++;
+    return res.json({ s: 1 });
+});
+
+app.post('/api/sync/:type', (req, res) => {
+  if (failsafeTriggered) {
+    return res.status(409).json({s: 0, msg: 'System is in failsafe mode. Resolve the failsafe before starting new jobs.'});
+  }
+  const jobMap = {
+    inventory: { name: 'Inventory Sync', fn: updateInventoryJob },
+    products: { name: 'New Product Sync', fn: createNewProductsJob },
+    discontinued: { name: 'Discontinued Check', fn: handleDiscontinuedProductsJob },
+    'improved-map-skus': { name: 'Comprehensive SKU Mapping', fn: improvedMapSkusJob },
+    deduplicate: { name: 'Find & Delete Duplicates', fn: deduplicateProductsJob },
+    'cleanse-unmatched': { name: 'Cleanse Unmatched Products', fn: cleanseUnmatchedProductsJob }
+  };
+  const { type } = req.params;
+  const job = jobMap[type];
+  if (!job) {
+    return res.status(400).json({s: 0, msg: 'Invalid job type'});
+  }
+  return startBackgroundJob(type, `Manual ${job.name}`, t => job.fn(t)) 
+    ? res.json({s: 1}) 
+    : res.status(409).json({s: 0, msg: 'Job already running'});
+});
+
+// Scheduled jobs
+cron.schedule('0 1 * * *', () => { 
+    if (!systemPaused && !failsafeTriggered) 
+        startBackgroundJob('inventory', 'Scheduled Inventory Sync', t => updateInventoryJob(t)); 
+});
+cron.schedule('0 2 * * 5', () => { 
+    if (!systemPaused && !failsafeTriggered) 
+        startBackgroundJob('products', 'Scheduled Product Sync', t => createNewProductsJob(t)); 
+});
+cron.schedule('0 3 * * *', () => { 
+    if (!systemPaused && !failsafeTriggered) 
+        startBackgroundJob('discontinued', 'Scheduled Discontinued Check', t => handleDiscontinuedProductsJob(t)); 
+});
+cron.schedule('0 9 * * 0', () => 
+    startBackgroundJob('errorReport', 'Weekly Error Report', () => generateAndSendErrorReport())
+);
+
+// Server startup
+const server = app.listen(PORT, () => {
+  addLog(`Server started on port ${PORT}`, 'success');
+  const missing = ['APIFY_TOKEN', 'SHOPIFY_ACCESS_TOKEN', 'SHOPIFY_DOMAIN', 'SHOPIFY_LOCATION_ID'].filter(key => !process.env[key]);
+  if (missing.length > 0) {
+    addLog(`FATAL: Missing environment variables: ${missing.join(', ')}`, 'error');
+    process.exit(1);
+  }
+  addLog(`Fetch validation configured: Apify ${FETCH_VALIDATION.MIN_APIFY_PRODUCTS}-${FETCH_VALIDATION.MAX_APIFY_PRODUCTS}, Shopify min ${FETCH_VALIDATION.MIN_SHOPIFY_SUPPLIER_PRODUCTS}`, 'info');
+  addLog(`Two-phase discontinuation enabled: ${FETCH_VALIDATION.PENDING_DISCONTINUE_HOURS} hour delay`, 'info');
+  if (CORE_SKUS.length > 0) {
+    addLog(`Core SKU monitoring enabled for ${CORE_SKUS.length} SKUs`, 'info');
+  }
+});
+
+process.on('SIGTERM', () => { 
+    addLog('SIGTERM received, shutting down...', 'warning'); 
+    server.close(() => process.exit(0)); 
+});
+
+process.on('SIGINT', () => { 
+    addLog('SIGINT received, shutting down...', 'warning'); 
+    server.close(() => process.exit(0)); 
+});
