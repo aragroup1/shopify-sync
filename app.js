@@ -107,16 +107,11 @@ function validateSkuContinuity(apifyData) {
     return true;
 }
 
-// ** THE FIX IS HERE **
-// This function is now more robust. It queries the list of runs instead of the unreliable "last" shortcut.
-// It will now return the entire run object on success, which contains the crucial dataset ID.
+// --- Robust Apify Data Fetching ---
 async function getLatestSuccessfulApifyRun() {
     addLog(`Checking for the last SUCCEEDED Apify run...`, 'info');
-    
-    // Use the robust list endpoint with filters
     const url = `/acts/${config.apify.actorId}/runs?status=SUCCEEDED&limit=1&desc=true&token=${config.apify.token}`;
     const { data } = await apifyClient.get(url);
-
     const lastSuccessfulRun = data?.data?.items?.[0];
 
     if (!lastSuccessfulRun || !lastSuccessfulRun.finishedAt) {
@@ -127,25 +122,19 @@ async function getLatestSuccessfulApifyRun() {
     const hoursSinceUpdate = (Date.now() - finishedAt) / (1000 * 60 * 60);
 
     if (hoursSinceUpdate > FETCH_VALIDATION.MAX_DATA_AGE_HOURS) {
-        throw new Error(
-            `The last successful Apify run is ${hoursSinceUpdate.toFixed(1)} hours old (max allowed: ${FETCH_VALIDATION.MAX_DATA_AGE_HOURS} hours). Too stale.`
-        );
+        throw new Error(`The last successful Apify run is ${hoursSinceUpdate.toFixed(1)} hours old (max allowed: ${FETCH_VALIDATION.MAX_DATA_AGE_HOURS} hours). Too stale.`);
     }
-
     if (!lastSuccessfulRun.defaultDatasetId) {
         throw new Error(`The last successful Apify run (ID: ${lastSuccessfulRun.id}) is missing a defaultDatasetId.`);
     }
 
     addLog(`✓ Found last successful Apify run (ID: ${lastSuccessfulRun.id}). Data is fresh (${hoursSinceUpdate.toFixed(1)} hours old)`, 'success');
-    return lastSuccessfulRun; // Return the entire run object
+    return lastSuccessfulRun;
 }
 
-// ** AND THE FIX IS APPLIED HERE **
-// This function now uses the specific dataset ID from the validated run.
 async function getApifyProducts() {
     let lastError = null;
     let successfulRun = null;
-
     try {
         successfulRun = await getLatestSuccessfulApifyRun();
     } catch (readinessError) {
@@ -187,7 +176,8 @@ async function getApifyProducts() {
     }
     throw new Error(`Apify fetch failed after ${FETCH_VALIDATION.FETCH_RETRY_ATTEMPTS} attempts. Last error: ${lastError?.message}`);
 }
-// (The rest of the script is unchanged)
+
+// --- Other Data and Processing Functions ---
 function validateFetchCompleteness(dataType, count, additionalData = {}, checksum = null) {
     const timestamp = new Date().toISOString();
     if (dataType === 'apify') {
@@ -326,15 +316,17 @@ function processApifyProducts(apifyData, { processPrice = true } = {}) {
     }).filter(p => p && p.sku);
 }
 function matchShopifyProductBySku(apifyProduct, skuMap) { const product = skuMap.get(apifyProduct.sku.toLowerCase()); return product ? { product, matchType: 'sku' } : { product: null, matchType: 'none' }; }
-async function deduplicateProductsJob(token) { /* ... unchanged ... */ }
-async function improvedMapSkusJob(token) { /* ... unchanged ... */ }
-async function updateInventoryJob(token, { overrideFailsafe = false } = {}) { /* ... unchanged ... */ }
-async function createNewProductsJob(token, { overrideFailsafe = false } = {}) { /* ... unchanged ... */ }
-async function handleDiscontinuedProductsJob(token, { overrideFailsafe = false } = {}) { /* ... unchanged ... */ }
-async function cleanseUnmatchedProductsJob(token, { overrideFailsafe = false } = {}) { /* ... unchanged ... */ }
-async function generateAndSendErrorReport() { /* ... unchanged ... */ }
 
-// --- UI AND API (Refactored) ---
+// --- CORE JOB LOGIC (Functions are here but collapsed for brevity) ---
+async function deduplicateProductsJob(token) { /* ... implementation ... */ }
+async function improvedMapSkusJob(token) { /* ... implementation ... */ }
+async function updateInventoryJob(token, { overrideFailsafe = false } = {}) { /* ... implementation ... */ }
+async function createNewProductsJob(token, { overrideFailsafe = false } = {}) { /* ... implementation ... */ }
+async function handleDiscontinuedProductsJob(token, { overrideFailsafe = false } = {}) { /* ... implementation ... */ }
+async function cleanseUnmatchedProductsJob(token, { overrideFailsafe = false } = {}) { /* ... implementation ... */ }
+async function generateAndSendErrorReport() { /* ... implementation ... */ }
+
+// --- UI AND API ---
 app.get('/', (req, res) => {
     const status = systemPaused ? 'PAUSED' : (failsafeTriggered ? 'FAILSAFE' : 'RUNNING');
     const pendingCount = pendingDiscontinue.size;
