@@ -304,7 +304,7 @@ function processApifyProducts(apifyData, { processPrice = true } = {}) {
     return apifyData.map(item => {
         if (!item || !item.title) return null;
         const handle = normalizeForMatching(item.handle || item.title).replace(/ /g, '-');
-        let inventory = 20; if (item.variants?.[0]?.price?.stockStatus === 'OutOfStock') inventory = 0;
+        let inventory = 10; if (item.variants?.[0]?.price?.stockStatus === 'OutOfStock') inventory = 0;
         let sku = item.variants?.[0]?.sku || item.sku || '';
         const body_html = item.description || ''; let price = '0.00';
         if (item.variants?.[0]?.price?.current) {
